@@ -70,6 +70,12 @@ func (c *chatView) appendSystem(text string) {
 	c.render()
 }
 
+// reset 清空聊天区（/new 新会话用）。
+func (c *chatView) reset() {
+	c.entries = nil
+	c.render()
+}
+
 // render 重绘整个聊天区。
 func (c *chatView) render() {
 	c.view.Clear()

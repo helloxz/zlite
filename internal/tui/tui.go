@@ -35,6 +35,10 @@ type TUI struct {
 	model string
 	cwd   string
 
+	// newSession 创建新会话并切换到它（/new 命令用，由 app.go 注入；
+	// TUI 不持有 session 管理逻辑，保持零业务）。
+	newSession func() error
+
 	g      *gocui.Gui
 	chat   *chatView
 	status *statusView
@@ -53,12 +57,14 @@ type TUI struct {
 }
 
 // New 创建 TUI。
-func New(cfg *config.Config, a agentFace, model, cwd string) *TUI {
+// New 创建 TUI。newSession 为 /new 命令的会话切换回调（可为 nil）。
+func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() error) *TUI {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &TUI{
 		cfg: cfg, agent: a, model: model, cwd: cwd,
-		uiTasks: make(chan func(), 128),
-		ctx:     ctx, cancel: cancel,
+		newSession: newSession,
+		uiTasks:    make(chan func(), 128),
+		ctx:        ctx, cancel: cancel,
 	}
 }
 
@@ -137,6 +143,9 @@ func (t *TUI) layout(g *gocui.Gui) error {
 		}
 		v.Editable = true
 		v.Editor = gocui.DefaultEditor
+		// Wrap=true：光标位置换算走累加字符宽度的分支（linesPosOnScreen 在
+		// Wrap=false 时把字符索引当列坐标，中文宽 2 导致光标落后半个字）。
+		v.Wrap = true
 		t.status = newStatusView(v, t.model)
 		t.status.render()
 		if _, err := g.SetCurrentView(inputViewName); err != nil {
@@ -218,6 +227,8 @@ func (t *TUI) handleCommand(cmd string) error {
 	switch cmd {
 	case "/exit", "/quit":
 		return gocui.ErrQuit
+	case "/new":
+		return t.newChat()
 	case "/plan":
 		t.switchMode(agent.ModePlan)
 	case "/build":
@@ -227,6 +238,26 @@ func (t *TUI) handleCommand(cmd string) error {
 	default:
 		t.chat.appendSystem("Unknown command: " + cmd + " (type /help for available commands)")
 	}
+	return nil
+}
+
+// newChat 新建会话（/new）：结束当前会话、创建新会话、重置模式为 plan。
+func (t *TUI) newChat() error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	if t.newSession == nil {
+		t.chat.appendSystem(colorize("Error: /new is unavailable", ansiRed))
+		return nil
+	}
+	if err := t.newSession(); err != nil {
+		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		return nil
+	}
+	t.chat.reset()
+	t.chat.appendSystem("New session started")
+	t.agent.SetMode(agent.ModePlan) // /new 后模式重置为 plan
 	return nil
 }
 
@@ -288,6 +319,7 @@ func (t *TUI) Stop() {
 }
 
 const helpText = `Available commands:
+  /new     Start a new session (mode resets to plan)
   /plan    Switch to plan mode (read-only: inspect and search only)
   /build   Switch to build mode (writable: modify files, run commands)
   /exit    Quit zlite

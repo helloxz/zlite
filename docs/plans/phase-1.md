@@ -111,3 +111,9 @@
 > shell 与危险命令 TUI 确认（tuiApprover）已提前实现（见 T4 扩展），从二期 P1 移入一期。
 > 按用户决策 D3 修订：**build 模式下写操作（write/edit/delete）直接执行，不确认**；
 > 仅危险 shell 命令（confirm_commands 黑名单 + 危险模式）需确认。
+
+### T10. /new 新建会话（2026-08-13 追加）
+
+- [x] `agent.SetSession(sess)`：关闭旧会话句柄并切换（会话实时落盘，切换安全）
+- [x] TUI `/new` 命令：`newSession` 回调注入（app.go 组装 mgr.Create + SetSession，TUI 保持零业务）；chat 区重置并提示 "New session started"；**模式重置为 plan**（用户决策）；busy 时提示等待
+- [x] helpText 补充 `/new`；测试：SetSession 切换/新会话对话落盘/交互 /new 分支（回调调用 + 提示 + 模式重置）

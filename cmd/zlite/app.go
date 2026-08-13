@@ -102,7 +102,18 @@ func run(opts options) error {
 	ag := agent.New(cfg, streamer, reg, sess, approver, cwd, mode)
 
 	// 7. TUI + 信号处理（SIGINT/SIGTERM 优雅退出，会话已实时落盘）
-	t := tui.New(cfg, ag, p.Model, cwd)
+	// newSession：/new 命令的会话切换回调（创建新会话并切换；defer 的 Close 会
+	// 关闭最终会话，旧会话由 agent.SetSession 关闭，Session.Close 幂等）。
+	newSession := func() error {
+		ns, err := mgr.Create(cwd, p, string(agent.ModePlan))
+		if err != nil {
+			return err
+		}
+		sess = ns
+		ag.SetSession(ns)
+		return nil
+	}
+	t := tui.New(cfg, ag, p.Model, cwd, newSession)
 	if ap, ok := approver.(*tui.Approver); ok {
 		ap.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}

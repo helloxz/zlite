@@ -52,6 +52,15 @@ func (a *Agent) Events() <-chan Event { return a.events }
 // Mode 返回当前模式。
 func (a *Agent) Mode() Mode { return a.mode }
 
+// SetSession 切换当前会话（/new 命令用）：关闭旧会话句柄并替换为新会话。
+// 会话文件实时落盘，切换安全；新会话历史为空。
+func (a *Agent) SetSession(sess *session.Session) {
+	if a.sess != nil {
+		a.sess.Close()
+	}
+	a.sess = sess
+}
+
 // SetMode 切换模式并广播事件。
 func (a *Agent) SetMode(m Mode) {
 	if a.mode == m {

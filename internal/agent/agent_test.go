@@ -363,3 +363,45 @@ func TestBuildSystemPrompt(t *testing.T) {
 		t.Errorf("build prompt 应标注可写: %s", p2)
 	}
 }
+
+func TestSetSession(t *testing.T) {
+	fs := &fakeStreamer{chunks: []llm.Chunk{{Finish: true}}}
+	a := newTestAgent(t, fs)
+
+	// 旧会话跑一轮
+	runAndCollect(t, a, "旧会话消息")
+	if n := len(a.sess.ToMessages()); n != 2 {
+		t.Fatalf("旧会话应有 2 条消息，得到 %d", n)
+	}
+
+	// 切换新会话
+	m := session.NewManager(t.TempDir())
+	ns, err := m.Create(testCwd, &config.Provider{Name: "default", Model: "m"}, config.ModePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetSession(ns)
+	if a.sess != ns {
+		t.Fatal("SetSession 后 agent 应使用新会话")
+	}
+	if n := len(a.sess.ToMessages()); n != 0 {
+		t.Fatalf("新会话历史应为空，得到 %d", n)
+	}
+
+	// 新会话可正常对话与落盘
+	runAndCollect(t, a, "新会话消息")
+	msgs := a.sess.ToMessages()
+	if len(msgs) != 2 || msgs[0].Content != "新会话消息" {
+		t.Errorf("新会话对话异常: %+v", msgs)
+	}
+
+	// 旧会话文件应可被 Continue 恢复（切换时已 Close，数据完整）
+	old, err := m.Continue(testCwd)
+	if err != nil {
+		t.Fatalf("新会话目录应能 Continue: %v", err)
+	}
+	old.Close()
+	if old.ID != ns.ID {
+		t.Errorf("Continue 应找到新会话: %q != %q", old.ID, ns.ID)
+	}
+}
