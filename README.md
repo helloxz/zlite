@@ -22,10 +22,10 @@ bin/zlite --version
 ```toml
 [[providers]]                    # 一期只取第一个，后期扩展多个
   name = "default"
-  type = "openai-compatible"     # OpenAI 兼容自定义端点
+  type = "openai.chat"            # 厂商.协议: openai.chat | openai.responses
   base_url = "https://api.example.com/v1"
   api_key = "${ZLITE_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
-  model = "gpt-4o"
+  models = ["gpt-4o"]
 
 [agent]
   mode = "plan"                  # plan（只读）| build（可写）
@@ -48,7 +48,7 @@ bin/zlite --version
 
 **二期（进行中）**：skills（SKILL.md 两级加载）、ACP 协议（`zlite acp`）、多渠道多模型（`/model`）、会话管理增强（列表选择、上下文截断细化）。
 
-详见 [docs/plans/README.md](./docs/plans/README.md)（架构、详细设计、实施计划）。
+详见 [docs/plans/README.md](./docs/plans/README.md)（架构、详细设计、实施计划）与 [docs/config.md](./docs/config.md)（配置文件说明）。
 
 ## 许可
 

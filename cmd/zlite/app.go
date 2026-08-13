@@ -113,7 +113,7 @@ func run(opts options) error {
 		ag.SetSession(ns)
 		return nil
 	}
-	t := tui.New(cfg, ag, p.Model, cwd, newSession)
+	t := tui.New(cfg, ag, p.Models[0], cwd, newSession)
 	if ap, ok := approver.(*tui.Approver); ok {
 		ap.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}

@@ -7,11 +7,13 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/zendev-sh/goai"
 	"github.com/zendev-sh/goai/provider"
 	"github.com/zendev-sh/goai/provider/compat"
+	"github.com/zendev-sh/goai/provider/openai"
 )
 
 // Role 是消息角色。
@@ -118,14 +120,35 @@ type StreamRequest struct {
 	Hooks    Hooks
 }
 
-// BuildModel 从配置构造 OpenAI 兼容模型。
-// 一期仅支持 type = openai-compatible；后续 type 分派在此扩展。
-func BuildModel(p *config.Provider) (provider.LanguageModel, error) {
-	opts := []compat.Option{compat.WithBaseURL(p.BaseURL)}
-	if p.APIKey != "" {
-		opts = append(opts, compat.WithAPIKey(p.APIKey))
+// Model 包装 goai 的 provider.LanguageModel，并携带 API 格式信息
+// （useResponsesAPI 是请求级开关，随每次生成请求注入 ProviderOptions）。
+type Model struct {
+	lm   provider.LanguageModel
+	resp bool // 使用 OpenAI Responses API（/v1/responses）
+}
+
+// BuildModel 按 provider.type（厂商.协议）构造模型：
+//   - openai.chat      → compat.Chat（Chat Completions，兼容一切自定义端点）
+//   - openai.responses → openai.Chat + useResponsesAPI=true（要求端点支持 /responses）
+//
+// 未来新增厂商（anthropic/google 等）在此追加分派即可，调用侧不变。
+func BuildModel(p *config.Provider) (*Model, error) {
+	switch p.Type {
+	case config.TypeOpenAIChat, "":
+		opts := []compat.Option{compat.WithBaseURL(p.BaseURL)}
+		if p.APIKey != "" {
+			opts = append(opts, compat.WithAPIKey(p.APIKey))
+		}
+		return &Model{lm: compat.Chat(p.Models[0], opts...)}, nil
+	case config.TypeOpenAIResponses:
+		opts := []openai.Option{openai.WithBaseURL(p.BaseURL)}
+		if p.APIKey != "" {
+			opts = append(opts, openai.WithAPIKey(p.APIKey))
+		}
+		return &Model{lm: openai.Chat(p.Models[0], opts...), resp: true}, nil
+	default:
+		return nil, fmt.Errorf("不支持的 provider type: %q", p.Type)
 	}
-	return compat.Chat(p.Model, opts...), nil
 }
 
 // ToProviderMessages 把 zlite 消息转换为 goai provider 消息。
@@ -175,9 +198,9 @@ type Streamer interface {
 	StreamText(ctx context.Context, req StreamRequest) (Stream, error)
 }
 
-// modelStreamer 把 LanguageModel 绑定为 Streamer。
+// modelStreamer 把 Model 绑定为 Streamer。
 type modelStreamer struct {
-	model provider.LanguageModel
+	model *Model
 }
 
 func (m modelStreamer) StreamText(ctx context.Context, req StreamRequest) (Stream, error) {
@@ -185,7 +208,7 @@ func (m modelStreamer) StreamText(ctx context.Context, req StreamRequest) (Strea
 }
 
 // Bind 返回绑定到指定模型的 Streamer。
-func Bind(model provider.LanguageModel) Streamer {
+func Bind(model *Model) Streamer {
 	return modelStreamer{model: model}
 }
 
@@ -195,11 +218,16 @@ type goaiStream struct {
 }
 
 // StreamText 发起一次流式生成（含多步工具循环，步数由 MaxSteps 控制）。
-func StreamText(ctx context.Context, model provider.LanguageModel, req StreamRequest) (Stream, error) {
+func StreamText(ctx context.Context, model *Model, req StreamRequest) (Stream, error) {
 	opts := []goai.Option{
 		goai.WithSystem(req.System),
 		goai.WithMessages(ToProviderMessages(req.Messages)...),
 		goai.WithMaxSteps(req.MaxSteps),
+	}
+	// Responses API 是请求级开关（goai 的 openai provider 默认开），
+	// 只在 type = openai.responses 时显式开启。
+	if model.resp {
+		opts = append(opts, goai.WithProviderOptions(map[string]any{"useResponsesAPI": true}))
 	}
 	if len(req.Tools) > 0 {
 		opts = append(opts, goai.WithTools(req.Tools...))
@@ -231,7 +259,7 @@ func StreamText(ctx context.Context, model provider.LanguageModel, req StreamReq
 		}))
 	}
 
-	ts, err := goai.StreamText(ctx, model, opts...)
+	ts, err := goai.StreamText(ctx, model.lm, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -79,7 +79,7 @@ confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"
 ## 需求总览
 
 1. 配置：toml + viper
-2. 模型：一期单一渠道/单一模型（OpenAI 兼容端点，chat 接口），二期多渠道多模型
+2. 模型：一期单渠道 + models 数组（默认第一个）+ type 厂商.协议（openai.chat / openai.responses），二期多渠道与运行时切换
 3. 平台：仅 Linux / macOS
 4. 交互：一期 TUI 连续对话；二期 ACP 协议（预留好设计）
 5. 模式：plan（只读）与 build（可写）两种模式
@@ -94,5 +94,5 @@ confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"
 
 ## 里程碑
 
-- **M1（阶段一）**：`zlite` 可启动 → 连续对话 → 流式输出 → `zlite -c` 恢复上下文
+- **M1（阶段一）**：`zlite` 可启动 → 连续对话 → 流式输出 → `zlite -c` 恢复上下文 → plan/build 权限与确认 → /new /init → 多模型 + type 分派 + .env
 - **M2（阶段二）**：plan/build 完整权限与确认、skills、ACP（`zlite acp`）、多渠道多模型

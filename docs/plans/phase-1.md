@@ -125,3 +125,13 @@
 - [x] TUI `/init`：plan 模式输出内容到聊天区 + 提示切 build 重试；build 模式直接 write_file 写入
 - [x] AGENTS.md 自动加载：`loadProjectContext(cwd)`（仅当前目录、>64KB 截断），每次 Run 组装 system prompt 时实时读取（/init 或手改后立即生效，无需重启）；config `agent.load_agents_md`（默认 true）；注入格式 `## Project Context (AGENTS.md)`
 - [x] 测试：加载/截断/注入/开关关闭/RunInit（plan 与 build 指令）/交互 /init 分支
+
+### P11. 多模型 + type 分派 + .env（原二期 P5 前置部分，提前落地）
+
+- [x] `Provider.Model` 改为 `Provider.Models []string`（不保留旧 `model` 兼容）
+- [x] 默认使用 `Models[0]`（状态栏显示、会话 meta 记录）
+- [x] type 取值规范 `厂商[.协议]`：`openai.chat`（默认）| `openai.responses`
+- [x] `llm.BuildModel` 按 type 分派：chat → `compat.Chat`；responses → `openai.Chat` + 请求级 `useResponsesAPI=true`
+- [x] `~/.zlite/.env` 自动加载（godotenv）：`ZLITE_API_KEY` 等变量经 `${ENV}` 展开
+- [x] 未知 type 启动 fail-fast；`docs/config.md` 完整配置说明
+- [ ] `/model` 运行时切换模型（多个模型间切换 UI，留在二期）

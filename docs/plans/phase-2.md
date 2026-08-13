@@ -49,9 +49,14 @@
 
 ### P5. 多渠道 / 多模型
 
+> 2026-08-13：单渠道多模型与 type 分派已提前完成并移入一期（见 phase-1.md P11）：
+> - ✅ `models` 数组（默认第一个）、type `厂商.协议` 分派（openai.chat / openai.responses）
+> - ✅ `~/.zlite/.env` 自动加载（godotenv）
+> 本项剩余：多渠道选择与运行时切换。
+
 - [ ] config `[[providers]]` 完整走通：`DefaultProvider()` 改为按 `name` 选择
 - [ ] `/model` 斜杠命令：列出 providers，`/model <name>` 切换（切换时重新 BuildModel + 更新状态栏 + 会话 meta 记录）
-- [ ] 预留 `type` 扩展：`openai-compatible` 之外的类型走 goai 各 provider 包（`provider/openai`、`provider/anthropic`、`provider/ollama` 等），llm 包内做类型分派
+- [ ] type 扩展：`anthropic`、`google`、`ollama` 等厂商走 goai 各 provider 包（`provider/anthropic`、`provider/google` 等），llm 包 `BuildModel` 分派表追加一行即可
 - [ ] 单测：多 provider 配置解析、切换逻辑
 
 ## 2. 验收标准（M2 完成定义）

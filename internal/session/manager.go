@@ -67,7 +67,7 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 
 	s := &Session{
 		ID: id, Path: path, file: f,
-		Mode: mode, Model: p.Model, Provider: p.Name,
+		Mode: mode, Model: p.Models[0], Provider: p.Name,
 	}
 	if s.Provider == "" {
 		s.Provider = "default"
@@ -76,7 +76,7 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 	head := Record{
 		Type: TypeSession, ID: id,
 		Cwd: cwd, CreatedAt: now.Format(time.RFC3339),
-		Model: p.Model, Provider: s.Provider, Mode: mode,
+		Model: p.Models[0], Provider: s.Provider, Mode: mode,
 		Version: version.String(), Ts: now.Format(time.RFC3339),
 	}
 	line, err := head.encode()

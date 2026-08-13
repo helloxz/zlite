@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
@@ -24,8 +25,11 @@ const (
 	ModePlan  = "plan"
 	ModeBuild = "build"
 
-	// TypeOpenAICompatible 是一期唯一支持的 provider 类型。
-	TypeOpenAICompatible = "openai-compatible"
+	// Provider type 取值：厂商[.协议]。
+	// 一期支持 OpenAI 系两种协议；未来新增厂商（如 anthropic/google）
+	// 直接在此追加枚举，llm.BuildModel 里加一行分派即可。
+	TypeOpenAIChat      = "openai.chat"      // OpenAI Chat Completions（默认，兼容一切自定义端点）
+	TypeOpenAIResponses = "openai.responses" // OpenAI Responses API（要求端点支持 /responses）
 )
 
 // 默认值。
@@ -34,6 +38,7 @@ const (
 	defaultMaxSteps    = 16
 	defaultSessionKeep = 20
 	defaultTheme       = "dark"
+	defaultType        = TypeOpenAIChat
 )
 
 // defaultConfirmCommands 是危险命令确认清单（决策 D4）。
@@ -48,13 +53,15 @@ type Config struct {
 	Session   SessionCfg `mapstructure:"session"`
 }
 
-// Provider 描述一个模型渠道（OpenAI 兼容端点）。
+// Provider 描述一个模型渠道。
+// Type 取值见 Type* 常量（厂商.协议），缺省 openai.chat；
+// Models 至少一个，默认使用第一个。
 type Provider struct {
-	Name    string `mapstructure:"name"`
-	Type    string `mapstructure:"type"`
-	BaseURL string `mapstructure:"base_url"`
-	APIKey  string `mapstructure:"api_key"` // 支持 ${ENV} 展开
-	Model   string `mapstructure:"model"`
+	Name    string   `mapstructure:"name"`
+	Type    string   `mapstructure:"type"`
+	BaseURL string   `mapstructure:"base_url"`
+	APIKey  string   `mapstructure:"api_key"` // 支持 ${ENV} 展开（可放 ~/.zlite/.env）
+	Models  []string `mapstructure:"models"`
 }
 
 // AgentCfg 是 agent 行为配置。
@@ -96,16 +103,11 @@ func DefaultConfig() *Config {
 	}
 }
 
-// DefaultPath 返回默认配置文件路径 ~/.zlite/config.toml。
-func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("获取用户主目录失败: %w", err)
-	}
-	return filepath.Join(home, ".zlite", "config.toml"), nil
-}
-
 // Load 读取配置文件。
+//
+// 读取前会先加载同目录下的 .env 文件（不存在则忽略），其中的变量
+// （如 ZLITE_API_KEY）可被 api_key 的 ${VAR} 引用。已存在的环境变量
+// 优先于 .env（godotenv 默认不覆盖），shell 里 export 与 .env 可共存。
 //
 // 文件不存在时返回 ErrConfigNotFound（上层可调用 WriteTemplate 生成模板后提示用户）。
 // APIKey 中的 ${VAR} 会在读取后展开；展开失败返回错误。
@@ -115,6 +117,14 @@ func Load(path string) (*Config, error) {
 			return nil, ErrConfigNotFound
 		}
 		return nil, fmt.Errorf("检查配置文件失败: %w", err)
+	}
+
+	// 自动加载与配置文件同目录的 .env（~/.zlite/.env），不存在则忽略。
+	dotEnv := filepath.Join(filepath.Dir(path), ".env")
+	if _, err := os.Stat(dotEnv); err == nil {
+		if err := godotenv.Load(dotEnv); err != nil {
+			return nil, fmt.Errorf("加载 %s 失败: %w", dotEnv, err)
+		}
 	}
 
 	v := viper.New()
@@ -142,6 +152,15 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// DefaultPath 返回默认配置文件路径 ~/.zlite/config.toml。
+func DefaultPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("获取用户主目录失败: %w", err)
+	}
+	return filepath.Join(home, ".zlite", "config.toml"), nil
+}
+
 // DefaultProvider 返回第一个 provider 并校验其合法性（一期单渠道）。
 func (c *Config) DefaultProvider() (*Provider, error) {
 	if len(c.Providers) == 0 {
@@ -149,16 +168,23 @@ func (c *Config) DefaultProvider() (*Provider, error) {
 	}
 	p := c.Providers[0] // 副本，避免外部修改内部状态
 	if p.Type == "" {
-		p.Type = TypeOpenAICompatible // 缺省即 OpenAI 兼容
+		p.Type = defaultType // 缺省 openai.chat
 	}
-	if p.Type != TypeOpenAICompatible {
-		return nil, fmt.Errorf("providers[0].type 暂不支持: %q（一期仅支持 %q）", p.Type, TypeOpenAICompatible)
+	switch p.Type {
+	case TypeOpenAIChat, TypeOpenAIResponses:
+	default:
+		return nil, fmt.Errorf("providers[0].type 暂不支持: %q（当前支持 %q / %q）", p.Type, TypeOpenAIChat, TypeOpenAIResponses)
 	}
 	if p.BaseURL == "" {
 		return nil, errors.New("providers[0].base_url 未配置")
 	}
-	if p.Model == "" {
-		return nil, errors.New("providers[0].model 未配置")
+	if len(p.Models) == 0 {
+		return nil, errors.New("providers[0].models 未配置（至少填写一个模型）")
+	}
+	for _, m := range p.Models {
+		if m == "" {
+			return nil, errors.New("providers[0].models 含空模型名")
+		}
 	}
 	return &p, nil
 }
@@ -205,14 +231,15 @@ func WriteTemplate(path string) error {
 	}
 
 	const tpl = `# zlite 配置文件
-# 修改后需重启 zlite 生效；api_key 支持 ${ENV} 形式引用环境变量，避免密钥落盘。
+# 修改后需重启 zlite 生效；api_key 支持 ${ENV} 形式引用环境变量，
+# 变量可写在 ~/.zlite/.env（推荐，避免密钥落盘）或 shell 环境里。
 
 [[providers]]                    # 一期只取第一个，后期扩展多个
   name = "default"
-  type = "openai-compatible"     # OpenAI 兼容自定义端点（一期仅支持此类型）
+  type = "openai.chat"           # 厂商.协议：openai.chat | openai.responses
   base_url = "https://api.example.com/v1"
-  api_key = "${ZLITE_API_KEY}"   # 请先 export ZLITE_API_KEY=sk-...
-  model = "gpt-4o"
+  api_key = "${ZLITE_API_KEY}"   # 放 ~/.zlite/.env: ZLITE_API_KEY=sk-...
+  models = ["gpt-4o", "gpt-4o-mini"]   # 可多个，默认使用第一个
 
 [agent]
   mode = "plan"                  # plan（只读）| build（可写）
