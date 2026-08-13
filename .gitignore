@@ -1,0 +1,10 @@
+# 构建产物
+bin/
+
+# 运行时数据（会话、项目级 skills 等）
+.zlite/
+
+# 日志与编辑器
+*.log
+*.swp
+.DS_Store

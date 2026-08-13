@@ -1,0 +1,28 @@
+// Command zlite 是轻量级 CLI Coding Agent 的入口。
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/helloxz/zlite/internal/version"
+)
+
+func main() {
+	mode := flag.String("m", "", "初始模式: plan | build（覆盖配置文件 agent.mode）")
+	cont := flag.Bool("c", false, "继续当前目录最近的会话")
+	list := flag.Bool("l", false, "列出当前目录的会话")
+	showVersion := flag.Bool("version", false, "打印版本并退出")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("zlite %s\n", version.String())
+		return
+	}
+
+	if err := run(options{mode: *mode, cont: *cont, list: *list}); err != nil {
+		fmt.Fprintln(os.Stderr, "zlite:", err)
+		os.Exit(1)
+	}
+}
