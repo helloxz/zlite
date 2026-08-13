@@ -53,14 +53,15 @@ func (s *statusView) setThinking(t string) {
 }
 
 // title 生成状态栏文本（纯文本，不嵌 ANSI——边框绘制不解析转义）。
-// 注意：不再展示 token 用量（usage 字段保留，仅隐藏）。
+// 注意：不再展示 token 用量（usage 字段保留，仅隐藏）；busy 显示在末尾，
+// 前置 | 分隔避免与命令提示混在一起。
 func (s *statusView) title() string {
 	busy := ""
 	if s.busy {
-		busy = " *busy*"
+		busy = " | *busy*"
 	}
-	return fmt.Sprintf(" [%s] %s%s | thinking: %s | /help for commands ",
-		string(s.mode), s.model, busy, s.thinking)
+	return fmt.Sprintf(" [%s] %s | thinking: %s | /help for commands%s ",
+		string(s.mode), s.model, s.thinking, busy)
 }
 
 // render 更新 Title 并强制重绘（Write(nil) 置 tainted，空写不改变内容）。

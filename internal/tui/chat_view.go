@@ -10,9 +10,16 @@ import (
 )
 
 // entry 是聊天区的一条展示记录（text 存原始文本，渲染时着色）。
+// thinking 是生成状态标记（仅 assistant 消息用，由对话生命周期 + 思维链事件驱动）：
+//
+//	"processing" = 本轮生成中（提交后立即显示 [processing...]）；
+//	"thinking" = 后端返回了思维链（切换为 [thinking...]）；
+//	"done" = 本轮生成结束（显示 [done]）；"" = 无状态或历史消息。
+//	标记只存在于显示层，不落盘、历史恢复时不出现。
 type entry struct {
-	kind string // user | assistant | tool | system
-	text string
+	kind     string // user | assistant | tool | system
+	text     string
+	thinking string
 }
 
 // chatView 是消息历史视图。
@@ -31,20 +38,55 @@ func newChatView(v *gocui.View) *chatView {
 	return &chatView{view: v, autoScroll: true}
 }
 
-// appendUser 追加用户消息。用户主动发言视为关注最新内容：若此前
-// 正在上翻看历史，先恢复自动滚动（回到底部）再追加。
+// appendUser 追加用户消息（每轮对话前插入一条弱化分隔线，标明回合边界）。
+// 用户主动发言视为关注最新内容：若此前正在上翻看历史，先恢复自动滚动
+// （回到底部）再追加。历史恢复（loadHistory）复用本方法，分隔线结构一致。
 func (c *chatView) appendUser(text string) {
 	c.scrollToBottom()
+	c.entries = append(c.entries, entry{kind: "divider"})
 	c.entries = append(c.entries, entry{kind: "user", text: text})
 	c.render()
 }
 
 // appendAssistantDelta 追加助手流式增量（自动归并到当前助手消息）。
+// 生成标记不固化：渲染时动态显示在内容上方（[processing...] 或 [thinking...] 换行），
+// 直到整轮生成结束由 finishProcessing 置为 done。
 func (c *chatView) appendAssistantDelta(delta string) {
 	if n := len(c.entries); n == 0 || c.entries[n-1].kind != "assistant" {
 		c.entries = append(c.entries, entry{kind: "assistant"})
 	}
 	c.entries[len(c.entries)-1].text += delta
+	c.render()
+}
+
+// startProcessing 标记当前助手消息进入生成中状态（用户提交后同步调用，
+// 立即显示 [processing...]）。已在生成中则忽略（防重复调用）。
+func (c *chatView) startProcessing() {
+	if n := len(c.entries); n > 0 && c.entries[n-1].kind == "assistant" && c.entries[n-1].thinking == "processing" {
+		return
+	}
+	c.entries = append(c.entries, entry{kind: "assistant", thinking: "processing"})
+	c.render()
+}
+
+// confirmThinking 把生成中状态切换为思考中（ThinkingStartEvent：
+// 后端返回了思维链）。仅 processing → thinking 单向切换；其余状态忽略。
+func (c *chatView) confirmThinking() {
+	if n := len(c.entries); n > 0 && c.entries[n-1].kind == "assistant" && c.entries[n-1].thinking == "processing" {
+		c.entries[n-1].thinking = "thinking"
+		c.render()
+	}
+}
+
+// finishProcessing 把生成状态标记为已结束（整轮生成完成后调用）。
+// 无论是否有思维链统一置 done；无进行中标记时忽略（防御）。
+func (c *chatView) finishProcessing() {
+	for i := len(c.entries) - 1; i >= 0; i-- {
+		if c.entries[i].kind == "assistant" && c.entries[i].thinking != "" && c.entries[i].thinking != "done" {
+			c.entries[i].thinking = "done"
+			break
+		}
+	}
 	c.render()
 }
 
@@ -115,10 +157,31 @@ func (c *chatView) render() {
 	c.view.Clear()
 	for _, e := range c.entries {
 		switch e.kind {
+		case "divider":
+			// 回合分隔线：弱化灰色，铺满内容区宽度
+			_, w := c.view.Size()
+			if w < 4 {
+				w = 4
+			}
+			fmt.Fprintln(c.view, colorize(strings.Repeat("-", w), ansiGray))
 		case "user":
 			fmt.Fprintln(c.view, colorize("You: "+e.text, ansiCyan))
+			// 用户消息与 AI 答复之间留一个空行，视觉上分隔输入与输出
+			fmt.Fprintln(c.view)
 		case "assistant":
-			fmt.Fprintln(c.view, colorize("Assistant: ", ansiCyan)+c.md.Render(e.text))
+			prefix := "Zlite: "
+			switch e.thinking {
+			case "processing":
+				// 生成中：标记后换行，流式内容从下一行出现
+				prefix += colorize("[processing...]", ansiYellow) + "\n"
+			case "thinking":
+				// 思考中（后端返回了思维链）：标记后换行，流式内容从下一行出现
+				prefix += colorize("[thinking...]", ansiYellow) + "\n"
+			case "done":
+				// 生成结束：统一 [done]，输出内容在下方
+				prefix += colorize("[done]", ansiGreen) + "\n"
+			}
+			fmt.Fprintln(c.view, colorize(prefix, ansiCyan)+c.md.Render(e.text))
 		case "tool":
 			fmt.Fprintln(c.view, colorize(e.text, ansiYellow))
 		case "system":

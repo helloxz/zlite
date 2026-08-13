@@ -29,6 +29,11 @@ type ToolResultEvent struct {
 // ModeChangeEvent 是模式切换事件。
 type ModeChangeEvent struct{ Mode Mode }
 
+// ThinkingStartEvent 是模型开始输出思考内容（reasoning 增量出现）时发出。
+// 仅广播一次；模型未返回思考内容时不发此事件。
+// UI 据此把生成状态从 [processing...] 切换为 [thinking...]。
+type ThinkingStartEvent struct{}
+
 // DoneEvent 是一轮对话结束（含 token 用量）。
 type DoneEvent struct{ Usage llm.Usage }
 
@@ -39,9 +44,10 @@ type ApprovalRequest struct {
 	Summary string
 }
 
-func (TextDeltaEvent) isEvent()  {}
-func (TextDoneEvent) isEvent()   {}
-func (ToolCallEvent) isEvent()   {}
-func (ToolResultEvent) isEvent() {}
-func (ModeChangeEvent) isEvent() {}
-func (DoneEvent) isEvent()       {}
+func (TextDeltaEvent) isEvent()     {}
+func (TextDoneEvent) isEvent()      {}
+func (ToolCallEvent) isEvent()      {}
+func (ToolResultEvent) isEvent()    {}
+func (ModeChangeEvent) isEvent()    {}
+func (ThinkingStartEvent) isEvent() {}
+func (DoneEvent) isEvent()          {}

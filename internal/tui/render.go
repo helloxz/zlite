@@ -12,6 +12,7 @@ const (
 	ansiGreen  = "\x1b[32m" // 代码块
 	ansiYellow = "\x1b[33m" // 工具行 / 状态强调
 	ansiRed    = "\x1b[31m" // 错误
+	ansiGray   = "\x1b[90m" // 分隔线等弱化元素
 )
 
 // colorize 用指定 ANSI 颜色码包裹文本。

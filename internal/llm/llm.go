@@ -56,6 +56,10 @@ type Usage struct {
 type Chunk struct {
 	// Text 是文本增量（模型回复时逐段产生）。
 	Text string
+	// Reasoning 是思考增量（模型思考时逐段产生，如 reasoning_content）。
+	// 透传给上层；当前 UI 不消费（思考状态由对话生命周期驱动），
+	// 保留以便未来展示思考内容时复用。
+	Reasoning string
 	// ToolCall 是模型请求的完整工具调用（非 nil 表示需要执行工具）。
 	ToolCall *ToolCall
 	// Finish 表示流结束（此时 Usage 有效）。
@@ -299,6 +303,9 @@ func (s *goaiStream) Chunks() <-chan Chunk {
 			switch ch.Type {
 			case provider.ChunkText:
 				out <- Chunk{Text: ch.Text}
+			case provider.ChunkReasoning:
+				// 思考增量透传（仅状态展示用，不落盘）
+				out <- Chunk{Reasoning: ch.Text}
 			case provider.ChunkToolCall:
 				out <- Chunk{ToolCall: &ToolCall{
 					ID:    ch.ToolCallID,

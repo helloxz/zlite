@@ -175,10 +175,18 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 	// 消费流
 	var fullText strings.Builder
 	var usage llm.Usage
+	thinkingStarted := false // 已广播 ThinkingStartEvent（仅首个 reasoning 增量触发一次）
 	for ch := range stream.Chunks() {
 		switch {
 		case ch.Err != nil:
 			return ch.Err
+		case ch.Reasoning != "":
+			// 思考增量：仅广播一次 Start（思考内容不落盘），
+			// UI 据此把 [processing...] 切换为 [thinking...]。
+			if !thinkingStarted {
+				thinkingStarted = true
+				a.emit(ThinkingStartEvent{})
+			}
 		case ch.Text != "":
 			fullText.WriteString(ch.Text)
 			a.emit(TextDeltaEvent{Text: ch.Text})

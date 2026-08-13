@@ -58,6 +58,7 @@ bin/zlite --version
 * `/switch`：切换模型：快捷键`Shift + Tab`
 * `/sessions`：切换对话，快捷键`Ctrl + L`
 * `/thinking`：思考强度切换，快捷键`Ctrl + T`
+* `/exit`：退出TUI终端，快捷键`Ctrl + C`
 
 ## 许可
 

@@ -9,3 +9,6 @@ bin/
 *.swp
 .DS_Store
 *_test.go
+
+TODO.md
+BUG.md

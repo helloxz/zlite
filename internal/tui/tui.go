@@ -362,6 +362,7 @@ func (t *TUI) submit(g *gocui.Gui, v *gocui.View) error {
 	// 存在 TOCTOU 窗口。
 	t.status.setBusy(true)
 	t.chat.appendUser(msg)
+	t.chat.startProcessing() // 同步立即显示 [processing...]（生成结束由 runAgent 置 done）
 	go t.runAgent(msg)
 	return nil
 }
@@ -389,6 +390,7 @@ func (t *TUI) runAgent(msg string) {
 	err := t.agent.Run(t.ctx, msg)
 	t.ui(func() {
 		t.status.setBusy(false)
+		t.chat.finishProcessing() // 整轮生成结束：统一置 [done]
 		if err != nil {
 			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
 		}
@@ -657,7 +659,8 @@ func (t *TUI) initProject(args string) error {
 	if args != "" {
 		msg = "/init " + args // 附加要求作为用户消息传给模型（会话记录完整）
 	}
-	t.status.setBusy(true) // 同步置位（同 submit：消除 busy 检查的 TOCTOU 窗口）
+	t.status.setBusy(true)   // 同步置位（同 submit：消除 busy 检查的 TOCTOU 窗口）
+	t.chat.startProcessing() // 同步显示 [processing...]（/init 完成由 runInit 置 done）
 	go t.runInit(msg)
 	return nil
 }
@@ -667,6 +670,7 @@ func (t *TUI) runInit(msg string) {
 	err := t.agent.RunInit(t.ctx, msg)
 	t.ui(func() {
 		t.status.setBusy(false)
+		t.chat.finishProcessing()
 		if err != nil {
 			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
 		}
@@ -733,6 +737,9 @@ func (t *TUI) consumeEvents() {
 			t.ui(func() { t.chat.finishToolCall(e) })
 		case agent.ModeChangeEvent:
 			t.ui(func() { t.status.setMode(e.Mode) })
+		case agent.ThinkingStartEvent:
+			// 后端返回思维链：processing → thinking
+			t.ui(func() { t.chat.confirmThinking() })
 		case agent.DoneEvent:
 			t.ui(func() { t.status.setUsage(e.Usage) })
 		}
