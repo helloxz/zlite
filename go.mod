@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/awesome-gocui/gocui v1.1.0
+	github.com/coder/acp-go-sdk v0.13.5
 	github.com/joho/godotenv v1.5.1
 	github.com/spf13/viper v1.21.0
 	github.com/zendev-sh/goai v0.9.0

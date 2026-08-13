@@ -20,9 +20,9 @@ import (
 	"github.com/zendev-sh/goai"
 )
 
-// skillsProvider 提供已发现的 skills 列表（*skills.Manager 实现；nil 表示未启用）。
-// 接口定义在 agent 包，便于测试注入 fake。
-type skillsProvider interface {
+// SkillsProvider 提供已发现的 skills 列表（*skills.Manager 实现；nil 表示未启用）。
+// 定义为导出接口，便于调用方（cmd / acp）安全传 nil。
+type SkillsProvider interface {
 	List() []skills.SkillInfo
 }
 
@@ -36,7 +36,7 @@ type Agent struct {
 	approver Approver
 	cwd      string
 	mode     Mode
-	skills   skillsProvider
+	skills   SkillsProvider
 	// thinking 是思考强度（none/low/medium/high/xhigh/max），
 	// 空字符串表示 auto：不传 reasoning_effort，由 API 自行决定。
 	thinking string
@@ -46,7 +46,7 @@ type Agent struct {
 
 // New 创建 Agent。
 // mode 为初始模式（plan/build）；skills 提供 skills 列表（nil 时不注入，测试可传 nil）。
-func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, sess *session.Session, approver Approver, cwd string, mode Mode, skills skillsProvider) *Agent {
+func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, sess *session.Session, approver Approver, cwd string, mode Mode, skills SkillsProvider) *Agent {
 	return &Agent{
 		cfg:      cfg,
 		streamer: streamer,
@@ -82,6 +82,14 @@ func (a *Agent) SetStreamer(s llm.Streamer) {
 	a.mu.Lock()
 	a.streamer = s
 	a.mu.Unlock()
+}
+
+// Thinking 返回当前思考强度（"auto" 表示不传参；与 SetThinking 归一化规则对应）。
+func (a *Agent) Thinking() string {
+	if a.thinking == "" {
+		return "auto"
+	}
+	return a.thinking
 }
 
 // SetThinking 设置思考强度（/thinking 命令用）。
@@ -249,6 +257,7 @@ func (a *Agent) onBeforeToolExecute(info llm.BeforeToolExecuteInfo) llm.BeforeTo
 		CallID:  info.CallID,
 		Tool:    info.Name,
 		Summary: summary,
+		Input:   info.Input,
 	})
 	if err != nil {
 		return llm.BeforeToolExecuteResult{

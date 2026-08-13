@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"syscall"
 
+	acpsdk "github.com/coder/acp-go-sdk"
+
+	"github.com/helloxz/zlite/internal/acp"
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
@@ -22,6 +25,7 @@ type options struct {
 	mode string // -m
 	cont bool   // -c
 	list bool   // -l
+	acp  bool   // --acp / acp 子命令：ACP 协议模式
 }
 
 // runtime 是一次运行所需的组件集合（run 与引导热重载共用）。
@@ -39,21 +43,32 @@ type runtime struct {
 	apUI      *tui.Approver // 非 nil 表示 TUI 内联确认器
 }
 
-// run 组装并启动 zlite：config → llm → tools → session → agent → tui。
-// 配置缺失或需要引导时进入 TUI 引导流程（完成后热重载，不重启）。
+// run 组装并启动 zlite：config → llm → tools → session → agent → tui / acp。
+// 配置缺失或需要引导时进入 TUI 引导流程（完成后热重载，不重启）；
+// ACP 模式无 TUI，配置未就绪时直接报错退出。
 func run(opts options) error {
+	if opts.acp && (opts.cont || opts.list || opts.mode != "") {
+		return errors.New("--acp cannot be combined with -c/-l/-m")
+	}
+
 	cfgPath, err := config.DefaultPath()
 	if err != nil {
 		return err
 	}
 	cfg, err := config.Load(cfgPath)
 	if errors.Is(err, config.ErrConfigNotFound) {
+		if opts.acp {
+			return errors.New("config file not found; run zlite once to complete setup before using --acp")
+		}
 		return runWithSetup(cfgPath, opts)
 	}
 	if err != nil {
 		return err
 	}
 	if cfg.NeedsSetup() {
+		if opts.acp {
+			return errors.New("zlite is not configured; run zlite once to complete setup before using --acp")
+		}
 		return runWithSetup(cfgPath, opts)
 	}
 	return runWithConfig(cfgPath, opts, cfg)
@@ -110,8 +125,8 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	}
 
 	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: p.Models[0], cwd: cwd, mgr: mgr, reg: reg, sk: sk, apUI: apUI}
-	if opts.list {
-		return rt, nil // 列表模式不创建会话
+	if opts.list || opts.acp {
+		return rt, nil // 列表模式不创建会话；ACP 模式会话按 NewSession 请求创建
 	}
 
 	var sess *session.Session
@@ -211,8 +226,29 @@ func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 	if opts.list {
 		return listSessions(rt.mgr, rt.cwd)
 	}
+	if opts.acp {
+		return runACP(rt)
+	}
 	defer rt.sess.Close()
 	return startTUI(rt, opts)
+}
+
+// runACP 以 ACP 协议模式运行：Agent 侧 stdio 连接，阻塞至客户端断开。
+// 注意：ACP 通信独占 stdout，任何日志只能走 stderr（上层已保证）。
+func runACP(rt *runtime) error {
+	ap := acp.New(acp.Options{
+		Cfg:             rt.cfg,
+		Provider:        rt.p,
+		ModelName:       rt.modelName,
+		Cwd:             rt.cwd,
+		Mgr:             rt.mgr,
+		GlobalSkillsDir: rt.sk.GlobalDir(),
+		AutoApprove:     rt.cfg.Agent.AutoApprove,
+	})
+	conn := acpsdk.NewAgentSideConnection(ap, os.Stdout, os.Stdin)
+	ap.Attach(conn)
+	<-conn.Done()
+	return nil
 }
 
 // runWithSetup 首次运行或缺配置：进入 TUI 引导，完成后热重载直接进入对话。

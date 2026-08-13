@@ -38,10 +38,12 @@ type ThinkingStartEvent struct{}
 type DoneEvent struct{ Usage llm.Usage }
 
 // ApprovalRequest 是确认请求（直接传给 Approver，不经事件通道）。
+// Input 是工具调用参数（ACP 权限请求展示用；TUI 确认不消费该字段）。
 type ApprovalRequest struct {
 	CallID  string
 	Tool    string
 	Summary string
+	Input   map[string]any
 }
 
 func (TextDeltaEvent) isEvent()     {}

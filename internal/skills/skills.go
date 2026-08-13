@@ -66,6 +66,11 @@ func New(globalDir, projectDir string) *Manager {
 	return m
 }
 
+// GlobalDir 返回全局 skills 目录（ACP 按会话 cwd 重建 skills 时复用）。
+func (m *Manager) GlobalDir() string {
+	return m.globalDir
+}
+
 // List 返回发现的 skills（注入与 /skills 共用数据源）。
 // 顺序：项目在前、全局在后（项目与当前任务相关性更高，截断优先丢全局）；
 // 各自按 name 排序，并截断到 MaxProjectSkills / MaxGlobalSkills（超出直接丢弃）。
