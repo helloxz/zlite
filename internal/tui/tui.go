@@ -19,6 +19,7 @@ import (
 type agentFace interface {
 	Events() <-chan agent.Event
 	Run(ctx context.Context, msg string) error
+	RunInit(ctx context.Context, msg string) error
 	SetMode(m agent.Mode)
 	Mode() agent.Mode
 }
@@ -222,9 +223,10 @@ func (t *TUI) runAgent(msg string) {
 	})
 }
 
-// handleCommand 处理斜杠命令。
+// handleCommand 处理斜杠命令（支持参数："/init <要求>"）。
 func (t *TUI) handleCommand(cmd string) error {
-	switch cmd {
+	name, args := splitCommand(cmd)
+	switch name {
 	case "/exit", "/quit":
 		return gocui.ErrQuit
 	case "/new":
@@ -233,12 +235,55 @@ func (t *TUI) handleCommand(cmd string) error {
 		t.switchMode(agent.ModePlan)
 	case "/build":
 		t.switchMode(agent.ModeBuild)
+	case "/init":
+		return t.initProject(args)
 	case "/help":
 		t.chat.appendSystem(helpText)
 	default:
 		t.chat.appendSystem("Unknown command: " + cmd + " (type /help for available commands)")
 	}
 	return nil
+}
+
+// splitCommand 把斜杠命令拆分为命令名与参数："/init 补充要求" → ("/init", "补充要求")。
+func splitCommand(cmd string) (name, args string) {
+	trimmed := strings.TrimSpace(cmd)
+	if i := strings.IndexByte(trimmed, ' '); i >= 0 {
+		return trimmed[:i], strings.TrimSpace(trimmed[i+1:])
+	}
+	return trimmed, ""
+}
+
+// initProject 执行 /init：plan 模式提示（只输出内容），build 模式写入文件。
+// args 是用户在命令后附加的补充要求（随用户消息传给模型）。
+func (t *TUI) initProject(args string) error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	if t.agent.Mode() == agent.ModePlan {
+		t.chat.appendSystem("Running /init in plan mode: AGENTS.md content will be shown here. Switch to build mode (Tab or /build) and run /init again to write it to disk.")
+	} else {
+		t.chat.appendSystem("Running /init: scanning the project and writing AGENTS.md...")
+	}
+	msg := "/init"
+	if args != "" {
+		msg = "/init " + args // 附加要求作为用户消息传给模型（会话记录完整）
+	}
+	go t.runInit(msg)
+	return nil
+}
+
+// runInit 在后台执行 init 任务。
+func (t *TUI) runInit(msg string) {
+	t.ui(func() { t.status.setBusy(true) })
+	err := t.agent.RunInit(t.ctx, msg)
+	t.ui(func() {
+		t.status.setBusy(false)
+		if err != nil {
+			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		}
+	})
 }
 
 // newChat 新建会话（/new）：结束当前会话、创建新会话、重置模式为 plan。
@@ -319,6 +364,7 @@ func (t *TUI) Stop() {
 }
 
 const helpText = `Available commands:
+  /init    Analyze the project and generate/refresh AGENTS.md
   /new     Start a new session (mode resets to plan)
   /plan    Switch to plan mode (read-only: inspect and search only)
   /build   Switch to build mode (writable: modify files, run commands)

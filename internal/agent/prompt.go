@@ -7,8 +7,9 @@ import (
 )
 
 // buildSystemPrompt 组装系统提示词（design.md §4）。
-// toolDescs 是当前模式可见工具的描述列表（"name: description"）。
-func buildSystemPrompt(cwd string, mode Mode, toolDescs []string) string {
+// toolDescs 是当前模式可见工具的描述列表（"name: description"）；
+// projectCtx 是项目 AGENTS.md 内容（非空时注入，见 loadProjectContext）。
+func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "你是 zlite，一个运行在终端里的轻量级编程助手。\n\n")
@@ -21,6 +22,15 @@ func buildSystemPrompt(cwd string, mode Mode, toolDescs []string) string {
 	b.WriteString("可用工具：\n")
 	for _, d := range toolDescs {
 		fmt.Fprintf(&b, "- %s\n", d)
+	}
+
+	// 项目上下文（AGENTS.md）：存在即注入，AI 遵循项目约定
+	if projectCtx != "" {
+		b.WriteString("\n## Project Context (AGENTS.md)\n")
+		b.WriteString(projectCtx)
+		b.WriteString("\n")
+
+		b.WriteString("\n项目规则（Project Context 中的内容优先于通用行为准则）\n")
 	}
 
 	b.WriteString("\n行为准则：\n")

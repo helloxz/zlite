@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,9 +55,14 @@ func (f *fakeStreamer) StreamText(ctx context.Context, req llm.StreamRequest) (l
 const testCwd = "/data/apps/zlite"
 
 func newTestSession(t *testing.T) *session.Session {
+	return newTestSessionAt(t, testCwd)
+}
+
+// newTestSessionAt 在指定 cwd 创建会话（AGENTS.md 注入测试用）。
+func newTestSessionAt(t *testing.T, cwd string) *session.Session {
 	t.Helper()
 	m := session.NewManager(t.TempDir())
-	s, err := m.Create(testCwd, &config.Provider{Name: "default", Model: "test-model"}, config.ModePlan)
+	s, err := m.Create(cwd, &config.Provider{Name: "default", Model: "test-model"}, config.ModePlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,15 +359,20 @@ func TestParseMode(t *testing.T) {
 }
 
 func TestBuildSystemPrompt(t *testing.T) {
-	p := buildSystemPrompt("/proj", ModePlan, []string{"read_file: 读文件", "grep: 搜索"})
+	p := buildSystemPrompt("/proj", ModePlan, []string{"read_file: 读文件", "grep: 搜索"}, "")
 	for _, want := range []string{"zlite", "/proj", "plan", "read_file", "只读"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt 缺少 %q: %s", want, p)
 		}
 	}
-	p2 := buildSystemPrompt("/proj", ModeBuild, nil)
+	p2 := buildSystemPrompt("/proj", ModeBuild, nil, "")
 	if !strings.Contains(p2, "可写") {
 		t.Errorf("build prompt 应标注可写: %s", p2)
+	}
+	// 项目上下文注入
+	p3 := buildSystemPrompt("/proj", ModePlan, nil, "# 项目说明\n构建: make build")
+	if !strings.Contains(p3, "Project Context (AGENTS.md)") || !strings.Contains(p3, "make build") {
+		t.Errorf("project context 应注入: %s", p3)
 	}
 }
 
@@ -403,5 +415,92 @@ func TestSetSession(t *testing.T) {
 	old.Close()
 	if old.ID != ns.ID {
 		t.Errorf("Continue 应找到新会话: %q != %q", old.ID, ns.ID)
+	}
+}
+
+// ---- AGENTS.md 自动加载与 /init ----
+
+func TestLoadProjectContext(t *testing.T) {
+	cwd := t.TempDir()
+
+	// 不存在 → 空
+	if got := loadProjectContext(cwd); got != "" {
+		t.Errorf("无 AGENTS.md 应返回空: %q", got)
+	}
+
+	// 存在 → 内容
+	os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("# 项目\nmake build"), 0o644)
+	got := loadProjectContext(cwd)
+	if !strings.Contains(got, "make build") {
+		t.Errorf("应返回 AGENTS.md 内容: %q", got)
+	}
+
+	// 超限截断
+	big := strings.Repeat("x", maxProjectContextBytes+100)
+	os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte(big), 0o644)
+	got = loadProjectContext(cwd)
+	if len(got) >= len(big) || !strings.Contains(got, "[truncated]") {
+		t.Errorf("超限应截断: len=%d", len(got))
+	}
+}
+
+func TestRunInjectsProjectContext(t *testing.T) {
+	fs := &fakeStreamer{chunks: []llm.Chunk{{Finish: true}}}
+
+	// 自定义 cwd（含 AGENTS.md）
+	cwd := t.TempDir()
+	os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("## Commands\nmake build"), 0o644)
+	cfg := config.DefaultConfig()
+	reg := tools.New(cwd, nil)
+	sess := newTestSessionAt(t, cwd)
+	a := New(cfg, fs, reg, sess, NewApprover(false), cwd, ModePlan)
+
+	runAndCollect(t, a, "你好")
+	if !strings.Contains(fs.reqs[0].System, "Project Context (AGENTS.md)") ||
+		!strings.Contains(fs.reqs[0].System, "make build") {
+		t.Errorf("system prompt 应注入 AGENTS.md 内容: %q", fs.reqs[0].System)
+	}
+
+	// 开关关闭时不注入
+	cfg.Agent.LoadAgentsMD = false
+	runAndCollect(t, a, "再来一轮")
+	if strings.Contains(fs.reqs[1].System, "Project Context") {
+		t.Errorf("load_agents_md=false 不应注入: %q", fs.reqs[1].System)
+	}
+}
+
+func TestRunInit(t *testing.T) {
+	fs := &fakeStreamer{chunks: []llm.Chunk{{Text: "AGENTS.md 已生成"}, {Finish: true}}}
+	a := newTestAgent(t, fs)
+	if err := a.RunInit(context.Background(), "/init"); err != nil {
+		t.Fatalf("RunInit 失败: %v", err)
+	}
+	// system prompt 是 init 指令
+	if !strings.Contains(fs.reqs[0].System, "AGENTS.md") || !strings.Contains(fs.reqs[0].System, "## Commands") {
+		t.Errorf("RunInit 应用 init 指令: %q", fs.reqs[0].System)
+	}
+	// 消息落盘
+	msgs := a.sess.ToMessages()
+	if len(msgs) != 2 || msgs[0].Content != "/init" {
+		t.Errorf("init 会话记录异常: %+v", msgs)
+	}
+
+	// plan 模式指令应要求输出内容而非写文件
+	fs3 := &fakeStreamer{chunks: []llm.Chunk{{Finish: true}}}
+	a3 := newTestAgent(t, fs3)
+	if err := a3.RunInit(context.Background(), "/init"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fs3.reqs[0].System, "plan 模式") {
+		t.Errorf("plan 模式指令应说明输出内容: %q", fs3.reqs[0].System)
+	}
+}
+
+func TestInitPromptConventions(t *testing.T) {
+	p := initSystemPrompt("/proj", ModeBuild)
+	for _, want := range []string{"中文注释", "性能优化", "一律用英文", "核心框架", "不要太啰嗦"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("init 指令应包含规范 %q", want)
+		}
 	}
 }

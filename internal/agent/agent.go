@@ -79,7 +79,32 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	if err := a.sess.AppendUser(userMsg); err != nil {
 		return fmt.Errorf("保存用户消息失败: %w", err)
 	}
+	return a.runOnce(ctx, a.buildPrompt())
+}
 
+// RunInit 执行项目初始化任务（/init）：扫描项目并生成/更新 AGENTS.md。
+// 复用 runOnce 核心循环，系统提示词替换为 init 指令模板。
+func (a *Agent) RunInit(ctx context.Context, userMsg string) error {
+	if err := a.sess.AppendUser(userMsg); err != nil {
+		return fmt.Errorf("保存用户消息失败: %w", err)
+	}
+	return a.runOnce(ctx, initSystemPrompt(a.cwd, a.mode))
+}
+
+// buildPrompt 组装当前模式的系统提示词（含项目 AGENTS.md 上下文，每次实时读取：
+// /init 或手改 AGENTS.md 后下一次对话立即生效，无需重启）。
+func (a *Agent) buildPrompt() string {
+	toolList := a.registry.ForMode(tools.Mode(a.mode))
+	projectCtx := ""
+	if a.cfg.Agent.LoadAgentsMD {
+		projectCtx = loadProjectContext(a.cwd)
+	}
+	return buildSystemPrompt(a.cwd, a.mode, toolDescriptions(toolList), projectCtx)
+}
+
+// runOnce 是核心生成循环（Run/RunInit 共用）：截断 → 组装请求 → StreamText
+// → 事件 → 落盘。用户消息须已由调用方 AppendUser。
+func (a *Agent) runOnce(ctx context.Context, system string) error {
 	// 上下文截断
 	all := a.sess.ToMessages()
 	history := truncateMessages(all, defaultMaxHistoryMessages)
@@ -89,10 +114,9 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 
 	// 组装请求
 	toolList := a.registry.ForMode(tools.Mode(a.mode))
-	prompt := buildSystemPrompt(a.cwd, a.mode, toolDescriptions(toolList))
 
 	stream, err := a.streamer.StreamText(ctx, llm.StreamRequest{
-		System:   prompt,
+		System:   system,
 		Messages: history,
 		Tools:    toolList,
 		MaxSteps: a.cfg.Agent.MaxSteps,

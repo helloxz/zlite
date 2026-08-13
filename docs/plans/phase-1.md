@@ -117,3 +117,11 @@
 - [x] `agent.SetSession(sess)`：关闭旧会话句柄并切换（会话实时落盘，切换安全）
 - [x] TUI `/new` 命令：`newSession` 回调注入（app.go 组装 mgr.Create + SetSession，TUI 保持零业务）；chat 区重置并提示 "New session started"；**模式重置为 plan**（用户决策）；busy 时提示等待
 - [x] helpText 补充 `/new`；测试：SetSession 切换/新会话对话落盘/交互 /new 分支（回调调用 + 提示 + 模式重置）
+
+### T11. /init 项目初始化 + AGENTS.md 自动加载（2026-08-13 追加）
+
+- [x] `agent.runOnce` 提取：Run/RunInit 共用核心循环（截断/请求/事件/落盘）
+- [x] `initSystemPrompt` 指令模板（方法论参考 Reasonix init skill）：已有 AGENTS.md 改进而非覆盖、探索清单（manifest/README/结构/代表源码）、验证命令真实存在、六节结构（Title/Project/Commands/Architecture/Conventions/Notes）、精简不含密钥
+- [x] TUI `/init`：plan 模式输出内容到聊天区 + 提示切 build 重试；build 模式直接 write_file 写入
+- [x] AGENTS.md 自动加载：`loadProjectContext(cwd)`（仅当前目录、>64KB 截断），每次 Run 组装 system prompt 时实时读取（/init 或手改后立即生效，无需重启）；config `agent.load_agents_md`（默认 true）；注入格式 `## Project Context (AGENTS.md)`
+- [x] 测试：加载/截断/注入/开关关闭/RunInit（plan 与 build 指令）/交互 /init 分支

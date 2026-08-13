@@ -62,6 +62,8 @@ type AgentCfg struct {
 	Mode        string `mapstructure:"mode"` // plan | build
 	AutoApprove bool   `mapstructure:"auto_approve"`
 	MaxSteps    int    `mapstructure:"max_steps"`
+	// LoadAgentsMD 自动加载项目根 AGENTS.md 注入系统提示词（默认开启）。
+	LoadAgentsMD bool `mapstructure:"load_agents_md"`
 }
 
 // ShellCfg 是 shell 工具配置。
@@ -83,9 +85,10 @@ type SessionCfg struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Agent: AgentCfg{
-			Mode:        defaultMode,
-			AutoApprove: false,
-			MaxSteps:    defaultMaxSteps,
+			Mode:         defaultMode,
+			AutoApprove:  false,
+			MaxSteps:     defaultMaxSteps,
+			LoadAgentsMD: true,
 		},
 		Shell:   ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
 		TUI:     TUISet{Theme: defaultTheme},
@@ -213,8 +216,9 @@ func WriteTemplate(path string) error {
 
 [agent]
   mode = "plan"                  # plan（只读）| build（可写）
-  auto_approve = false           # 信任模式（跳过写操作确认）
+  auto_approve = false           # 信任模式（跳过危险命令确认）
   max_steps = 16                 # 单轮工具循环上限
+  load_agents_md = true          # 自动加载项目根 AGENTS.md 注入系统提示词
 
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]

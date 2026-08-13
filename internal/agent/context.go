@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/helloxz/zlite/internal/llm"
 )
@@ -28,4 +30,21 @@ func truncateMessages(msgs []llm.Message, max int) []llm.Message {
 // truncationNote 生成截断说明（写入会话 meta）。
 func truncationNote(total, kept int) string {
 	return fmt.Sprintf("上下文截断：历史 %d 条 → 保留最近 %d 条", total, kept)
+}
+
+// maxProjectContextBytes 是 AGENTS.md 注入上下文的最大字节数（防撑爆）。
+const maxProjectContextBytes = 64 * 1024
+
+// loadProjectContext 读取项目根（cwd）的 AGENTS.md。
+// 文件不存在/不可读返回空（不注入）；超过上限截断并标注。
+func loadProjectContext(cwd string) string {
+	data, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
+	if err != nil {
+		return ""
+	}
+	s := string(data)
+	if len(s) > maxProjectContextBytes {
+		s = s[:maxProjectContextBytes] + "\n...[truncated]"
+	}
+	return s
 }
