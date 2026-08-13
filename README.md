@@ -59,6 +59,7 @@ bin/zlite --version
 * `/sessions`：切换对话，快捷键`Ctrl + L`
 * `/thinking`：思考强度切换，快捷键`Ctrl + T`
 * `/exit`：退出TUI终端，快捷键`Ctrl + C`
+* 聊天区滚动：`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到顶部/底部
 
 ## 许可
 

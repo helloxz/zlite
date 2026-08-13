@@ -15,14 +15,22 @@
 
 ### P2. skills（兼容 Claude Code 格式）
 
-- [ ] `internal/skills`：
-  - `SKILL.md` 解析：YAML frontmatter（`name` / `description`，可加 `allowed-tools` 等扩展字段）+ Markdown body；无 frontmatter 的目录跳过
-  - 两级加载：全局 `~/.zlite/skills/` + 项目 `<cwd>/.zlite/skills/`（项目优先，同名覆盖）；递归扫描 `**/SKILL.md`
-- [ ] 注入策略：全部 skill 的 `name + description` 列表注入 system prompt；正文按需读取
-- [ ] `tools/skills.go`：`read_skill` 工具（参数 `name`，返回 SKILL.md 全文），全模式可用
-- [ ] `/skills` 斜杠命令：列出已发现 skills（含来源目录）
-- [ ] 单测：frontmatter 解析、两级加载优先级、同名覆盖
-- [ ] 内置示例 skill（如 `git-workflow`）放 `skills/` 目录作为样例
+> 2026-08-25：本项已完成。
+> - ✅ `internal/skills`：SKILL.md 解析（YAML frontmatter `name`/`description` + Markdown body；无 frontmatter 或缺 name/description 的目录跳过；description 空白折叠为单行）
+> - ✅ 两级加载：全局 `~/.zlite/skills/` + 项目 `<cwd>/.zlite/skills/`（项目优先，同名覆盖）；递归扫描 `**/SKILL.md`（跳过 .git/node_modules）；每次 List/Read 实时重扫，RWMutex 保护并发
+> - ✅ 注入策略：全部 skill 的 `name + description (source)` 列表注入 system prompt（`## Available Skills` 段），正文按需读取；`read_skill` 工具（参数 `name`，frontmatter name 精确匹配，fallback 目录名），全模式可用
+> - ✅ `/skills` 斜杠命令：列出已发现 skills（name/description/来源层级/SKILL.md 路径），已加入 /help
+> - ✅ 单测：frontmatter 解析（11 例）、两级加载优先级、同名覆盖、递归扫描、目录名 fallback、实时重扫、read_skill 工具、agent 注入、TUI 命令
+> - 决策：不实现 allowed-tools 工具过滤（仅按 Claude Code 格式解析 name/description）；不内置示例 skill；不加配置开关（始终启用，目录不存在时自然空转）；注入数量上限 全局 5 / 项目 10（2026-08-25 用户决策：List 按 name 排序取前 N，超出直接丢弃，项目在前全局在后）
+
+- [x] `internal/skills`：
+  - [x] `SKILL.md` 解析：YAML frontmatter（`name` / `description`）+ Markdown body；无 frontmatter 或缺 name/description 的目录跳过
+  - [x] 两级加载：全局 `~/.zlite/skills/` + 项目 `<cwd>/.zlite/skills/`（项目优先，同名覆盖）；递归扫描 `**/SKILL.md`
+- [x] 注入策略：全部 skill 的 `name + description` 列表注入 system prompt；正文按需读取
+- [x] `tools/skills.go`：`read_skill` 工具（参数 `name`，返回 SKILL.md 全文），全模式可用
+- [x] `/skills` 斜杠命令：列出已发现的 skills（含来源目录）
+- [x] 单测：frontmatter 解析、两级加载优先级、同名覆盖
+- [ ] ~~内置示例 skill~~（用户决策：不提供示例，skills 完全由用户目录驱动）
 
 ### P3. 会话管理增强
 

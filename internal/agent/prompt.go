@@ -8,8 +8,9 @@ import (
 
 // buildSystemPrompt 组装系统提示词（design.md §4）。
 // toolDescs 是当前模式可见工具的描述列表（"name: description"）；
-// projectCtx 是项目 AGENTS.md 内容（非空时注入，见 loadProjectContext）。
-func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx string) string {
+// projectCtx 是项目 AGENTS.md 内容（非空时注入，见 loadProjectContext）；
+// skillDescs 是已发现 skills 的描述列表（"name: description (source: ...)"，非空时注入）。
+func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx string, skillDescs []string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "你是 zlite，一个运行在终端里的轻量级编程助手。\n\n")
@@ -31,6 +32,15 @@ func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx str
 		b.WriteString("\n")
 
 		b.WriteString("\n项目规则（Project Context 中的内容优先于通用行为准则）\n")
+	}
+
+	// skills 清单（name + description）：正文按需 read_skill 读取，不全文注入
+	if len(skillDescs) > 0 {
+		b.WriteString("\n## Available Skills\n")
+		for _, d := range skillDescs {
+			fmt.Fprintf(&b, "- %s\n", d)
+		}
+		b.WriteString("当任务与某个 skill 匹配时，先调用 read_skill 读取其正文，再遵循其中的指令执行；不匹配则忽略。\n")
 	}
 
 	b.WriteString("\n行为准则：\n")

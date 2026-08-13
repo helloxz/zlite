@@ -15,9 +15,16 @@ import (
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
 	"github.com/helloxz/zlite/internal/session"
+	"github.com/helloxz/zlite/internal/skills"
 	"github.com/helloxz/zlite/internal/tools"
 	"github.com/zendev-sh/goai"
 )
+
+// skillsProvider 提供已发现的 skills 列表（*skills.Manager 实现；nil 表示未启用）。
+// 接口定义在 agent 包，便于测试注入 fake。
+type skillsProvider interface {
+	List() []skills.SkillInfo
+}
 
 // Agent 是一轮轮对话的执行者。
 type Agent struct {
@@ -29,6 +36,7 @@ type Agent struct {
 	approver Approver
 	cwd      string
 	mode     Mode
+	skills   skillsProvider
 	// thinking 是思考强度（none/low/medium/high/xhigh/max），
 	// 空字符串表示 auto：不传 reasoning_effort，由 API 自行决定。
 	thinking string
@@ -37,8 +45,8 @@ type Agent struct {
 }
 
 // New 创建 Agent。
-// mode 为初始模式（plan/build）。
-func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, sess *session.Session, approver Approver, cwd string, mode Mode) *Agent {
+// mode 为初始模式（plan/build）；skills 提供 skills 列表（nil 时不注入，测试可传 nil）。
+func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, sess *session.Session, approver Approver, cwd string, mode Mode, skills skillsProvider) *Agent {
 	return &Agent{
 		cfg:      cfg,
 		streamer: streamer,
@@ -47,6 +55,7 @@ func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, se
 		approver: approver,
 		cwd:      cwd,
 		mode:     mode,
+		skills:   skills,
 		events:   make(chan Event, 64),
 	}
 }
@@ -128,15 +137,29 @@ func (a *Agent) RunInit(ctx context.Context, userMsg string) error {
 	return a.runOnce(ctx, initSystemPrompt(a.cwd, a.mode))
 }
 
-// buildPrompt 组装当前模式的系统提示词（含项目 AGENTS.md 上下文，每次实时读取：
-// /init 或手改 AGENTS.md 后下一次对话立即生效，无需重启）。
+// buildPrompt 组装当前模式的系统提示词（含项目 AGENTS.md 与 skills 列表，
+// 每次实时读取：/init、手改 AGENTS.md 或 skills 变更后下一次对话立即生效，无需重启）。
 func (a *Agent) buildPrompt() string {
 	toolList := a.registry.ForMode(tools.Mode(a.mode))
 	projectCtx := ""
 	if a.cfg.Agent.LoadAgentsMD {
 		projectCtx = loadProjectContext(a.cwd)
 	}
-	return buildSystemPrompt(a.cwd, a.mode, toolDescriptions(toolList), projectCtx)
+	return buildSystemPrompt(a.cwd, a.mode, toolDescriptions(toolList), projectCtx, a.skillDescriptions())
+}
+
+// skillDescriptions 提取 skills 描述列表（"name: description (source: ...)"，
+// 注入系统提示词；skills 未启用时返回 nil）。
+func (a *Agent) skillDescriptions() []string {
+	if a.skills == nil {
+		return nil
+	}
+	infos := a.skills.List()
+	out := make([]string, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, fmt.Sprintf("%s: %s (source: %s)", s.Name, s.Description, s.Source))
+	}
+	return out
 }
 
 // runOnce 是核心生成循环（Run/RunInit 共用）：截断 → 组装请求 → StreamText

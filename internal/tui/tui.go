@@ -59,6 +59,9 @@ type TUI struct {
 	sessionItems  func() ([]SessionItem, error)
 	switchSession func(id string) error
 
+	// skillsLister 返回已发现的 skills 列表（/skills 用，app.go 注入）。
+	skillsLister func() []SkillItem
+
 	// thinking 是当前思考强度显示值（默认 auto；与 agent 侧实际传参
 	// 对应：auto 归一化为不传）。
 	thinking string
@@ -162,6 +165,19 @@ func (t *TUI) SetSessionSwitcher(items func() ([]SessionItem, error), fn func(id
 	t.switchSession = fn
 }
 
+// SkillItem 是 /skills 列表中的一项（app.go 把 skills.SkillInfo 转换后注入）。
+type SkillItem struct {
+	Name        string // frontmatter name
+	Description string // frontmatter description
+	Source      string // "global" | "project"（来源层级）
+	Path        string // SKILL.md 绝对路径
+}
+
+// SetSkillsLister 配置 /skills 命令：返回已发现的 skills 列表（可为空）。
+func (t *TUI) SetSkillsLister(fn func() []SkillItem) {
+	t.skillsLister = fn
+}
+
 // ui 把 UI 更新任务加入串行队列（FIFO，顺序保证）。
 func (t *TUI) ui(f func()) {
 	t.uiTasks <- f
@@ -186,7 +202,9 @@ func (t *TUI) Run() error {
 // run 在指定 Gui 上运行主循环（测试可传入 OutputSimulator 的 Gui）。
 func (t *TUI) run(g *gocui.Gui) error {
 	t.g = g
-	g.Mouse = true // 启用鼠标事件（滚轮滚动聊天区；必须在 MainLoop 前设置）
+	// 刻意不启用 g.Mouse（保持 false）：请求鼠标事件（mouse tracking）会
+	// 让终端模拟器放弃原生文本选择，拖拽选字/复制失效。滚动一律走键盘
+	// （PgUp/PgDn 翻页、Home/End 到顶/到底），与 opencode 等工具同策略。
 	defer g.Close()
 
 	t.setup(g)
@@ -235,20 +253,19 @@ func (t *TUI) setup(g *gocui.Gui) {
 	// Tab 切换 plan/build 模式（view 级优先于 DefaultEditor 的 tab 插入）
 	g.SetKeybinding(inputViewName, gocui.KeyTab, gocui.ModNone, t.toggleMode)
 	g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, t.toggleMode)
-	// 聊天区滚动：PgUp/PgDn 翻页、Ctrl+U/Ctrl+D 半页、鼠标滚轮 3 行。
+	// 聊天区滚动：PgUp/PgDn 翻页、Home/End 直接到顶/到底。
+	// 不请求鼠标事件（见 run 注释），滚动纯键盘。
 	// 全局绑定安全：输入框的 DefaultEditor 不使用这些键（无编辑冲突）；
 	// 弹窗打开时 handler 内忽略（见 chatScroll）。
-	g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone, t.chatScroll(-1, false))
-	g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone, t.chatScroll(1, false))
-	g.SetKeybinding("", gocui.KeyCtrlU, gocui.ModNone, t.chatScroll(-1, true))
-	g.SetKeybinding("", gocui.KeyCtrlD, gocui.ModNone, t.chatScroll(1, true))
-	g.SetKeybinding("", gocui.MouseWheelUp, gocui.ModNone, t.chatScrollLines(-3))
-	g.SetKeybinding("", gocui.MouseWheelDown, gocui.ModNone, t.chatScrollLines(3))
+	g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone, t.chatScroll(-1))
+	g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone, t.chatScroll(1))
+	g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, t.chatJumpTop)
+	g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, t.chatJumpBottom)
 }
 
-// chatScroll 生成聊天区滚动 handler：dy 为方向（-1 上翻 / +1 下翻），
-// half=true 时步进为半页，否则为整页。列表弹窗打开时忽略滚动。
-func (t *TUI) chatScroll(dy int, half bool) func(g *gocui.Gui, v *gocui.View) error {
+// chatScroll 生成聊天区翻页 handler：dy 为方向（-1 上翻 / +1 下翻），
+// 一页 = 可视高度 - 1 行（避免滚动过头）。列表弹窗打开时忽略滚动。
+func (t *TUI) chatScroll(dy int) func(g *gocui.Gui, v *gocui.View) error {
 	return func(g *gocui.Gui, v *gocui.View) error {
 		if t.chat == nil {
 			return nil
@@ -257,27 +274,34 @@ func (t *TUI) chatScroll(dy int, half bool) func(g *gocui.Gui, v *gocui.View) er
 			return nil // 弹窗内 PgUp/PgDn 不滚动聊天区
 		}
 		_, maxY := t.chat.view.Size()
-		step := maxY - 1
-		if half {
-			step /= 2
-		}
-		t.chat.scrollBy(dy * step)
+		t.chat.scrollBy(dy * (maxY - 1))
 		return nil
 	}
 }
 
-// chatScrollLines 生成按固定行数滚动的 handler（鼠标滚轮用）。
-func (t *TUI) chatScrollLines(dy int) func(g *gocui.Gui, v *gocui.View) error {
-	return func(g *gocui.Gui, v *gocui.View) error {
-		if t.chat == nil {
-			return nil
-		}
-		if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
-			return nil
-		}
-		t.chat.scrollBy(dy)
+// chatJumpTop 直接滚动到聊天区顶部（Home）。列表弹窗打开时忽略。
+func (t *TUI) chatJumpTop(g *gocui.Gui, v *gocui.View) error {
+	if t.chat == nil {
 		return nil
 	}
+	if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
+		return nil
+	}
+	t.chat.scrollToTop()
+	return nil
+}
+
+// chatJumpBottom 直接滚动到聊天区底部并恢复自动跟随（End）。
+// 列表弹窗打开时忽略。
+func (t *TUI) chatJumpBottom(g *gocui.Gui, v *gocui.View) error {
+	if t.chat == nil {
+		return nil
+	}
+	if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
+		return nil
+	}
+	t.chat.scrollToBottom()
+	return nil
 }
 
 // layout 两区布局：消息区（带边框）+ 输入区（3 行高带边框，内容区 1 行；
@@ -415,6 +439,8 @@ func (t *TUI) handleCommand(cmd string) error {
 		return t.handleThinking(args)
 	case "/sessions":
 		return t.handleSessions()
+	case "/skills":
+		return t.handleSkills()
 	case "/init":
 		return t.initProject(args)
 	case "/help":
@@ -543,6 +569,30 @@ func (t *TUI) handleSessions() error {
 	return t.openPicker(" Select session ", labels, ids, 0, func(g *gocui.Gui, id string) error {
 		return t.switchToSession(id)
 	})
+}
+
+// handleSkills 列出已发现的 skills（/skills 命令，含来源层级与路径）。
+// 与 /sessions 一致：仅展示，不打断进行中的生成，busy 时也可查看。
+func (t *TUI) handleSkills() error {
+	if t.skillsLister == nil {
+		t.chat.appendSystem(colorize("Error: /skills is unavailable", ansiRed))
+		return nil
+	}
+	items := t.skillsLister()
+	if len(items) == 0 {
+		t.chat.appendSystem("No skills found (place SKILL.md under ~/.zlite/skills/ or <cwd>/.zlite/skills/)")
+		return nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Available skills (%d):", len(items))
+	for _, it := range items {
+		fmt.Fprintf(&b, "\n  %s (%s): %s", it.Name, it.Source, it.Description)
+		if it.Path != "" {
+			fmt.Fprintf(&b, "\n    %s", it.Path)
+		}
+	}
+	t.chat.appendSystem(b.String())
+	return nil
 }
 
 // switchToSession 切换到指定会话并刷新聊天区为新会话的历史。
@@ -768,11 +818,12 @@ const helpText = `Available commands:
   /switch   Switch model (Shift+Tab, pick from the list, or /switch <model>)
   /thinking Switch thinking effort (Ctrl+T, pick from the list, or /thinking <effort>; auto = let the API decide)
   /sessions Switch to a recent session (Ctrl+L)
+  /skills   List discovered skills (global + project)
   /exit     Quit zlite
   /help     Show this help
 
 Usage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.
-Scroll chat history with PgUp/PgDn (page), Ctrl+U/Ctrl+D (half page) or the mouse wheel.`
+Scroll chat history with PgUp/PgDn (page) or Home/End (top/bottom). Mouse selection is left to the terminal.`
 
 // ---- 首次配置引导（setup state machine）----
 

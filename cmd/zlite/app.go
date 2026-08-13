@@ -12,6 +12,7 @@ import (
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
 	"github.com/helloxz/zlite/internal/session"
+	"github.com/helloxz/zlite/internal/skills"
 	"github.com/helloxz/zlite/internal/tools"
 	"github.com/helloxz/zlite/internal/tui"
 )
@@ -32,6 +33,7 @@ type runtime struct {
 	cwd       string
 	mgr       *session.Manager
 	reg       *tools.Registry
+	sk        *skills.Manager
 	sess      *session.Session
 	ag        *agent.Agent
 	apUI      *tui.Approver // 非 nil 表示 TUI 内联确认器
@@ -87,7 +89,11 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	if err != nil {
 		return nil, err
 	}
+	// skills：全局 ~/.zlite/skills/ + 项目 <cwd>/.zlite/skills/（项目优先同名覆盖），
+	// read_skill 工具供模型按需读取 skill 正文
+	sk := skills.New(filepath.Join(filepath.Dir(cfgPath), "skills"), filepath.Join(cwd, ".zlite", "skills"))
 	reg := tools.New(cwd, cfg.Shell.ConfirmCommands)
+	reg.Register(tools.ReadSkillTool(sk))
 
 	// 会话
 	mgr := session.NewManager(filepath.Join(filepath.Dir(cfgPath), "sessions"))
@@ -103,7 +109,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 		approver = apUI
 	}
 
-	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: p.Models[0], cwd: cwd, mgr: mgr, reg: reg, apUI: apUI}
+	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: p.Models[0], cwd: cwd, mgr: mgr, reg: reg, sk: sk, apUI: apUI}
 	if opts.list {
 		return rt, nil // 列表模式不创建会话
 	}
@@ -121,7 +127,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 		return nil, err
 	}
 	rt.sess = sess
-	rt.ag = agent.New(cfg, streamer, reg, sess, approver, cwd, mode)
+	rt.ag = agent.New(cfg, streamer, reg, sess, approver, cwd, mode, sk)
 	return rt, nil
 }
 
@@ -186,6 +192,16 @@ func (rt *runtime) sessionItems() ([]tui.SessionItem, error) {
 	return items, nil
 }
 
+// skillItems 返回 /skills 列表数据源（skills.SkillInfo → tui.SkillItem）。
+func (rt *runtime) skillItems() []tui.SkillItem {
+	infos := rt.sk.List()
+	items := make([]tui.SkillItem, 0, len(infos))
+	for _, in := range infos {
+		items = append(items, tui.SkillItem{Name: in.Name, Description: in.Description, Source: in.Source, Path: in.Path})
+	}
+	return items
+}
+
 // runWithConfig 正常启动（配置已就绪）。
 func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 	rt, err := buildRuntime(cfgPath, cfg, opts)
@@ -225,6 +241,7 @@ func runWithSetup(cfgPath string, opts options) error {
 		t.SetModel(rt.modelName)
 		t.SetSwitchModel(rt.p.Models, rt.switchModel)
 		t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
+		t.SetSkillsLister(rt.skillItems)
 		t.SetNewSession(func() error {
 			ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
 			if err != nil {
@@ -258,6 +275,7 @@ func startTUI(rt *runtime, opts options) error {
 	t := tui.New(rt.cfg, rt.ag, rt.modelName, rt.cwd, newSession)
 	t.SetSwitchModel(rt.p.Models, rt.switchModel)
 	t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
+	t.SetSkillsLister(rt.skillItems)
 	if rt.apUI != nil {
 		rt.apUI.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}

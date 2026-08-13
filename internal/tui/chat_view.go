@@ -236,6 +236,14 @@ func (c *chatView) scrollBy(dy int) {
 	c.view.SetOrigin(0, oy)
 }
 
+// scrollToTop 直接滚动到顶部（查看最早的消息），并退出自动滚动：
+// 后续新消息渲染不把用户拉走，直到手动滚回底部或发消息。
+func (c *chatView) scrollToTop() {
+	c.autoScroll = false
+	c.view.Autoscroll = false
+	c.view.SetOrigin(0, 0)
+}
+
 // scrollToBottom 恢复自动跟随底部。
 func (c *chatView) scrollToBottom() {
 	c.autoScroll = true
