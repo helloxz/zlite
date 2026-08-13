@@ -159,7 +159,15 @@ func (rt *runtime) switchSession(id string) error {
 }
 
 // sessionItems 返回最近 20 条会话（/sessions 列表数据源）。
+// 展示前先清理空会话（创建后未对话即退出的残留），再取列表。
 func (rt *runtime) sessionItems() ([]tui.SessionItem, error) {
+	skipID := ""
+	if rt.sess != nil {
+		skipID = rt.sess.ID // 当前打开的会话不删（文件句柄仍在使用）
+	}
+	if _, err := rt.mgr.PruneEmpty(rt.cwd, 30, skipID); err != nil {
+		return nil, err
+	}
 	infos, err := rt.mgr.List(rt.cwd)
 	if err != nil {
 		return nil, err

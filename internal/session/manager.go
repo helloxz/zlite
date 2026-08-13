@@ -118,6 +118,34 @@ func (m *Manager) Open(cwd, id string) (*Session, error) {
 	return m.open(path)
 }
 
+// PruneEmpty 删除最近 limit 条会话中没有任何对话记录（message）的空会话
+// （创建后未对话即退出的残留），返回删除数量。
+// skipID 指定跳过不删的会话 ID（如当前打开的会话，文件句柄仍在使用）。
+// 判定口径与 List 一致：仅数 TypeMessage，meta/tool 记录不算对话内容。
+func (m *Manager) PruneEmpty(cwd string, limit int, skipID string) (int, error) {
+	infos, err := m.List(cwd)
+	if err != nil {
+		return 0, err
+	}
+	if len(infos) > limit {
+		infos = infos[:limit]
+	}
+	removed := 0
+	for _, in := range infos {
+		if skipID != "" && in.ID == skipID {
+			continue
+		}
+		if in.Messages > 0 {
+			continue
+		}
+		if err := os.Remove(in.Path); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 // List 列出 cwd 下的会话（按修改时间倒序）。
 func (m *Manager) List(cwd string) ([]Info, error) {
 	dir := m.dirFor(cwd)
