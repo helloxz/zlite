@@ -82,6 +82,11 @@ func (a *Agent) SetMode(m Mode) {
 	a.emit(ModeChangeEvent{Mode: m})
 }
 
+// History 返回当前会话的模型消息历史（/sessions 切换会话后 UI 渲染用）。
+func (a *Agent) History() []llm.Message {
+	return a.sess.ToMessages()
+}
+
 // Run 执行一轮对话：追加用户消息 → 模型生成（含工具循环）→ 落盘。
 func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	if strings.TrimSpace(userMsg) == "" {

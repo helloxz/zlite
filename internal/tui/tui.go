@@ -14,6 +14,7 @@ import (
 	"github.com/awesome-gocui/gocui"
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/config"
+	"github.com/helloxz/zlite/internal/llm"
 )
 
 // agentFace 是 TUI 依赖的 agent 能力（测试可注入 fake）。
@@ -23,6 +24,7 @@ type agentFace interface {
 	RunInit(ctx context.Context, msg string) error
 	SetMode(m agent.Mode)
 	Mode() agent.Mode
+	History() []llm.Message // 当前会话历史（/sessions 切换后渲染用）
 }
 
 const (
@@ -45,8 +47,17 @@ type TUI struct {
 	// switchModel 执行实际切换（app.go 注入：重建模型流并注入 agent）。
 	models      []string
 	switchModel func(name string) error
-	// pickerSel 是模型选择弹窗的当前选中行（仅主循环线程读写）。
-	pickerSel int
+
+	// sessionItems 返回可切换的会话列表（/sessions 用，app.go 注入：
+	// 最近 20 条，含标题与创建时间）；switchSession 执行会话切换。
+	sessionItems  func() ([]SessionItem, error)
+	switchSession func(id string) error
+
+	// 列表弹窗状态（/switch 与 /sessions 共用，仅主循环线程读写）。
+	pickerLabels []string
+	pickerValues []string
+	pickerOnPick func(g *gocui.Gui, value string) error
+	pickerSel    int
 
 	// setupNeeded 为 true 时进入首次配置引导（type → base_url → api_key → models），
 	// 完成后调用 onSetupDone 落盘并热重载（app.go 注入）。
@@ -119,11 +130,25 @@ func (t *TUI) SetNewSession(fn func() error) {
 	t.newSession = fn
 }
 
+// SessionItem 是 /sessions 列表中的一项（app.go 把 session.Info 转换后注入）。
+type SessionItem struct {
+	ID    string // 会话 ID（切换时传给 switchSession）
+	Title string // 会话标题（可为空，UI 显示 (no title)）
+	Time  string // 创建时间（已格式化，如 "01-02 15:04"）
+}
+
 // SetSwitchModel 配置 /switch 命令：models 为可选模型列表（来自配置
 // providers[0].models），fn 执行实际切换（由 app.go 注入）。
 func (t *TUI) SetSwitchModel(models []string, fn func(name string) error) {
 	t.models = models
 	t.switchModel = fn
+}
+
+// SetSessionSwitcher 配置 /sessions 命令（Ctrl+L 共用）：
+// items 返回可切换的会话列表（最近 20 条），fn 按会话 ID 执行切换。
+func (t *TUI) SetSessionSwitcher(items func() ([]SessionItem, error), fn func(id string) error) {
+	t.sessionItems = items
+	t.switchSession = fn
 }
 
 // ui 把 UI 更新任务加入串行队列（FIFO，顺序保证）。
@@ -150,6 +175,7 @@ func (t *TUI) Run() error {
 // run 在指定 Gui 上运行主循环（测试可传入 OutputSimulator 的 Gui）。
 func (t *TUI) run(g *gocui.Gui) error {
 	t.g = g
+	g.Mouse = true // 启用鼠标事件（滚轮滚动聊天区；必须在 MainLoop 前设置）
 	defer g.Close()
 
 	t.setup(g)
@@ -185,9 +211,54 @@ func (t *TUI) setup(g *gocui.Gui) {
 	g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, t.quit)
 	// 输入区：Enter 提交
 	g.SetKeybinding(inputViewName, gocui.KeyEnter, gocui.ModNone, t.submit)
+	// Ctrl+L 打开会话列表（/sessions 等效；绑在 input view，弹窗打开时不触发）
+	g.SetKeybinding(inputViewName, gocui.KeyCtrlL, gocui.ModNone, t.openSessionsKey)
 	// Tab 切换 plan/build 模式（view 级优先于 DefaultEditor 的 tab 插入）
 	g.SetKeybinding(inputViewName, gocui.KeyTab, gocui.ModNone, t.toggleMode)
 	g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, t.toggleMode)
+	// 聊天区滚动：PgUp/PgDn 翻页、Ctrl+U/Ctrl+D 半页、鼠标滚轮 3 行。
+	// 全局绑定安全：输入框的 DefaultEditor 不使用这些键（无编辑冲突）；
+	// 弹窗打开时 handler 内忽略（见 chatScroll）。
+	g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone, t.chatScroll(-1, false))
+	g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone, t.chatScroll(1, false))
+	g.SetKeybinding("", gocui.KeyCtrlU, gocui.ModNone, t.chatScroll(-1, true))
+	g.SetKeybinding("", gocui.KeyCtrlD, gocui.ModNone, t.chatScroll(1, true))
+	g.SetKeybinding("", gocui.MouseWheelUp, gocui.ModNone, t.chatScrollLines(-3))
+	g.SetKeybinding("", gocui.MouseWheelDown, gocui.ModNone, t.chatScrollLines(3))
+}
+
+// chatScroll 生成聊天区滚动 handler：dy 为方向（-1 上翻 / +1 下翻），
+// half=true 时步进为半页，否则为整页。列表弹窗打开时忽略滚动。
+func (t *TUI) chatScroll(dy int, half bool) func(g *gocui.Gui, v *gocui.View) error {
+	return func(g *gocui.Gui, v *gocui.View) error {
+		if t.chat == nil {
+			return nil
+		}
+		if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
+			return nil // 弹窗内 PgUp/PgDn 不滚动聊天区
+		}
+		_, maxY := t.chat.view.Size()
+		step := maxY - 1
+		if half {
+			step /= 2
+		}
+		t.chat.scrollBy(dy * step)
+		return nil
+	}
+}
+
+// chatScrollLines 生成按固定行数滚动的 handler（鼠标滚轮用）。
+func (t *TUI) chatScrollLines(dy int) func(g *gocui.Gui, v *gocui.View) error {
+	return func(g *gocui.Gui, v *gocui.View) error {
+		if t.chat == nil {
+			return nil
+		}
+		if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
+			return nil
+		}
+		t.chat.scrollBy(dy)
+		return nil
+	}
 }
 
 // layout 两区布局：消息区（带边框）+ 输入区（3 行高带边框，内容区 1 行；
@@ -226,16 +297,15 @@ func (t *TUI) layout(g *gocui.Gui) error {
 		t.chat.appendSystem("zlite ready - " + t.cwd)
 	}
 
-	// 模型选择弹窗 view 常驻（启动时创建一次，Visible=false 隐藏）：
+	// 列表选择弹窗 view 常驻（启动时创建一次，Visible=false 隐藏）：
 	// 运行期只切 Visible/坐标，不增删 g.views——gocui 的 loaderTick 会
-	// 并发遍历 views，增删存在数据竞争（见 model_picker.go 注释）。
-	if _, err := g.View(modelPickerViewName); err != nil {
-		v, err := g.SetView(modelPickerViewName, 0, 0, 1, 1, 0)
+	// 并发遍历 views，增删存在数据竞争（见 picker.go 注释）。
+	if _, err := g.View(pickerViewName); err != nil {
+		v, err := g.SetView(pickerViewName, 0, 0, 1, 1, 0)
 		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
 			return err
 		}
 		v.Visible = false
-		v.Title = " Select model "
 		v.Highlight = true // 光标所在行用 Sel 配色高亮
 		v.SelBgColor = gocui.ColorCyan
 		v.SelFgColor = gocui.ColorBlack
@@ -320,6 +390,8 @@ func (t *TUI) handleCommand(cmd string) error {
 		t.switchMode(agent.ModeBuild)
 	case "/switch":
 		return t.handleSwitch(args)
+	case "/sessions":
+		return t.handleSessions()
 	case "/init":
 		return t.initProject(args)
 	case "/help":
@@ -345,6 +417,119 @@ func (t *TUI) handleSwitch(args string) error {
 		return t.openModelPicker()
 	}
 	return t.switchToModel(args)
+}
+
+// openModelPicker 弹出模型选择列表（/switch 无参数时调用），
+// 默认定位到当前模型。
+func (t *TUI) openModelPicker() error {
+	if len(t.models) == 0 {
+		t.chat.appendSystem(colorize("No models configured (providers[0].models)", ansiRed))
+		return nil
+	}
+	labels := make([]string, len(t.models))
+	initial := 0
+	for i, m := range t.models {
+		labels[i] = "  " + m
+		if m == t.model {
+			initial = i
+		}
+	}
+	return t.openPicker(" Select model ", labels, t.models, initial, func(g *gocui.Gui, name string) error {
+		return t.switchToModel(name)
+	})
+}
+
+// handleSessions 处理 /sessions（Ctrl+L 共用）：弹出最近会话列表，
+// 每项显示标题与创建时间；Enter 切换到选中会话并重绘聊天区历史。
+func (t *TUI) handleSessions() error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	if t.sessionItems == nil || t.switchSession == nil {
+		t.chat.appendSystem(colorize("Error: /sessions is unavailable", ansiRed))
+		return nil
+	}
+	items, err := t.sessionItems()
+	if err != nil {
+		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		return nil
+	}
+	if len(items) == 0 {
+		t.chat.appendSystem("No sessions yet")
+		return nil
+	}
+	labels := make([]string, len(items))
+	ids := make([]string, len(items))
+	for i, it := range items {
+		title := it.Title
+		if title == "" {
+			title = "(no title)"
+		}
+		title = truncateDisplay(title, 18) // 按显示宽度截断（CJK 计 2）
+		labels[i] = "  " + padDisplay(title, 18) + " " + it.Time
+		ids[i] = it.ID
+	}
+	return t.openPicker(" Select session ", labels, ids, 0, func(g *gocui.Gui, id string) error {
+		return t.switchToSession(id)
+	})
+}
+
+// switchToSession 切换到指定会话并刷新聊天区为新会话的历史。
+func (t *TUI) switchToSession(id string) error {
+	if err := t.switchSession(id); err != nil {
+		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		return nil
+	}
+	if t.agent != nil {
+		t.chat.loadHistory(t.agent.History())
+	}
+	t.chat.appendSystem("Switched to session " + id)
+	return nil
+}
+
+// openSessionsKey 是 Ctrl+L 键位：与 /sessions 命令等效。
+func (t *TUI) openSessionsKey(g *gocui.Gui, v *gocui.View) error {
+	return t.handleSessions()
+}
+
+// padDisplay 按终端显示宽度（displayWidth）把 s 右侧补空格到宽度 w；
+// 已超宽时原样返回。用于会话列表标题列对齐。
+func padDisplay(s string, w int) string {
+	width := displayWidth(s)
+	if width >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-width)
+}
+
+// displayWidth 返回字符串的终端显示宽度：CJK 等宽字符计 2，其余计 1。
+func displayWidth(s string) int {
+	width := 0
+	for _, r := range s {
+		if r > 0x2E7F { // CJK 部首区起视为宽字符（含中文、全角标点、假名）
+			width += 2
+		} else {
+			width++
+		}
+	}
+	return width
+}
+
+// truncateDisplay 按显示宽度截断 s（超出部分以省略号结尾）。
+func truncateDisplay(s string, w int) string {
+	width := 0
+	for i, r := range []rune(s) {
+		rw := 1
+		if r > 0x2E7F {
+			rw = 2
+		}
+		if width+rw > w {
+			return string([]rune(s)[:i]) + "…"
+		}
+		width += rw
+	}
+	return s
 }
 
 // switchToModel 校验模型名并执行切换（弹窗确认与 /switch <name> 共用）。
@@ -484,15 +669,17 @@ func (t *TUI) Stop() {
 }
 
 const helpText = `Available commands:
-  /init    Analyze the project and generate/refresh AGENTS.md
-  /new     Start a new session (mode resets to plan)
-  /plan    Switch to plan mode (read-only: inspect and search only)
-  /build   Switch to build mode (writable: modify files, run commands)
-  /switch  Switch model (pick from the list, or /switch <model>)
-  /exit    Quit zlite
-  /help    Show this help
+  /init     Analyze the project and generate/refresh AGENTS.md
+  /new      Start a new session (mode resets to plan)
+  /plan     Switch to plan mode (read-only: inspect and search only)
+  /build    Switch to build mode (writable: modify files, run commands)
+  /switch   Switch model (pick from the list, or /switch <model>)
+  /sessions Switch to a recent session (Ctrl+L)
+  /exit     Quit zlite
+  /help     Show this help
 
-Usage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.`
+Usage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.
+Scroll chat history with PgUp/PgDn (page), Ctrl+U/Ctrl+D (half page) or the mouse wheel.`
 
 // ---- 首次配置引导（setup state machine）----
 

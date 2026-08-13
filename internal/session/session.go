@@ -10,6 +10,12 @@ import (
 	"github.com/helloxz/zlite/internal/llm"
 )
 
+// metaTitleEvent 是标题落盘的 meta 事件名（首条用户消息时写入）。
+const metaTitleEvent = "title"
+
+// maxTitleRunes 是会话标题最大字符数（按 rune 计数，避免截断中文）。
+const maxTitleRunes = 30
+
 // Session 表示一个打开的会话（对应 ~/.zlite/sessions/<cwd-hash>/<id>.jsonl）。
 type Session struct {
 	ID       string
@@ -17,9 +23,14 @@ type Session struct {
 	Mode     string
 	Model    string
 	Provider string
+	Title    string // 会话标题（首条用户消息截取，持久化在 meta 记录中）
 
 	file    *os.File
 	History []Record // 恢复后内存中的记录（不含 session 首行）
+
+	// titleSet 标记标题已确定（区别于 Title=="" 的未设置状态）：
+	// 首条消息为纯空白时标题为空串，但仍视为已确定，避免重复写 meta。
+	titleSet bool
 }
 
 // Append 追加一行记录：写文件（立即落盘）并同步到 History。
@@ -42,8 +53,29 @@ func (s *Session) Append(r Record) error {
 }
 
 // AppendUser 记录用户消息。
+// 首条用户消息时自动生成会话标题（截取内容前段）并以 meta 记录落盘；
+// meta 写入成功后才更新内存状态，失败时调用方重试不会丢标题。
 func (s *Session) AppendUser(content string) error {
+	if !s.titleSet {
+		title := extractTitle(content)
+		if err := s.AppendMeta(metaTitleEvent, title); err != nil {
+			return err
+		}
+		s.Title = title
+		s.titleSet = true
+	}
 	return s.Append(Record{Type: TypeMessage, Role: "user", Content: content})
+}
+
+// extractTitle 从首条用户消息提取会话标题：去除首尾空白后取前
+// maxTitleRunes 个字符，超出部分以省略号结尾。
+func extractTitle(content string) string {
+	s := strings.TrimSpace(content)
+	runes := []rune(s)
+	if len(runes) <= maxTitleRunes {
+		return s
+	}
+	return string(runes[:maxTitleRunes]) + "…"
 }
 
 // AppendAssistant 记录助手回复（含 token 用量）。

@@ -139,6 +139,45 @@ func (rt *runtime) switchModel(name string) error {
 	return nil
 }
 
+// switchSession 切换到指定 ID 的会话（/sessions 命令用）：
+// 打开会话文件并替换 agent 的当前会话（旧会话由 SetSession 关闭），
+// 模式同步为会话创建时的模式（状态栏与工具集随之更新）。
+func (rt *runtime) switchSession(id string) error {
+	if rt.sess != nil && rt.sess.ID == id {
+		return nil // 已在该会话，无需切换
+	}
+	sess, err := rt.mgr.Open(rt.cwd, id)
+	if err != nil {
+		return err
+	}
+	rt.sess = sess
+	rt.ag.SetSession(sess)
+	if m, err := agent.ParseMode(sess.Mode); err == nil {
+		rt.ag.SetMode(m) // 广播 ModeChangeEvent，TUI 状态栏同步
+	}
+	return nil
+}
+
+// sessionItems 返回最近 20 条会话（/sessions 列表数据源）。
+func (rt *runtime) sessionItems() ([]tui.SessionItem, error) {
+	infos, err := rt.mgr.List(rt.cwd)
+	if err != nil {
+		return nil, err
+	}
+	if len(infos) > 20 {
+		infos = infos[:20] // List 已按创建时间倒序
+	}
+	items := make([]tui.SessionItem, 0, len(infos))
+	for _, in := range infos {
+		items = append(items, tui.SessionItem{
+			ID:    in.ID,
+			Title: in.Title,
+			Time:  in.CreatedAt.Format("01-02 15:04"),
+		})
+	}
+	return items, nil
+}
+
 // runWithConfig 正常启动（配置已就绪）。
 func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 	rt, err := buildRuntime(cfgPath, cfg, opts)
@@ -177,6 +216,7 @@ func runWithSetup(cfgPath string, opts options) error {
 		t.SetAgent(rt.ag)
 		t.SetModel(rt.modelName)
 		t.SetSwitchModel(rt.p.Models, rt.switchModel)
+		t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
 		t.SetNewSession(func() error {
 			ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
 			if err != nil {
@@ -209,6 +249,7 @@ func startTUI(rt *runtime, opts options) error {
 	}
 	t := tui.New(rt.cfg, rt.ag, rt.modelName, rt.cwd, newSession)
 	t.SetSwitchModel(rt.p.Models, rt.switchModel)
+	t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
 	if rt.apUI != nil {
 		rt.apUI.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}
@@ -232,13 +273,20 @@ func listSessions(mgr *session.Manager, cwd string) error {
 		fmt.Println("当前目录没有会话记录")
 		return nil
 	}
-	fmt.Printf("%-19s  %-6s  %-12s  %s\n", "ID", "MODE", "MODEL", "消息数")
+	fmt.Printf("%-19s  %-6s  %-12s  %-22s  %s\n", "ID", "MODE", "MODEL", "TITLE", "消息数")
 	for _, info := range infos {
 		model := info.Model
 		if len(model) > 12 {
 			model = model[:12]
 		}
-		fmt.Printf("%-19s  %-6s  %-12s  %d\n", info.ID, info.Mode, model, info.Messages)
+		title := info.Title
+		if title == "" {
+			title = "(no title)" // 旧会话无标题记录
+		}
+		if tr := []rune(title); len(tr) > 20 {
+			title = string(tr[:20]) + "…"
+		}
+		fmt.Printf("%-19s  %-6s  %-12s  %-22s  %d\n", info.ID, info.Mode, model, title, info.Messages)
 	}
 	return nil
 }

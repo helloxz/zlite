@@ -24,6 +24,7 @@ type Info struct {
 	Model     string
 	Provider  string
 	Mode      string
+	Title     string
 	CreatedAt time.Time
 	Messages  int
 }
@@ -107,6 +108,16 @@ func (m *Manager) Continue(cwd string) (*Session, error) {
 	return m.open(matches[0])
 }
 
+// Open 按会话 ID 打开 cwd 下的会话（/sessions 切换用）。
+// 会话不存在时返回 ErrNoSession。
+func (m *Manager) Open(cwd, id string) (*Session, error) {
+	path := filepath.Join(m.dirFor(cwd), id+".jsonl")
+	if _, err := os.Stat(path); err != nil {
+		return nil, ErrNoSession
+	}
+	return m.open(path)
+}
+
 // List 列出 cwd 下的会话（按修改时间倒序）。
 func (m *Manager) List(cwd string) ([]Info, error) {
 	dir := m.dirFor(cwd)
@@ -128,15 +139,21 @@ func (m *Manager) List(cwd string) ([]Info, error) {
 		st, _ := os.Stat(p)
 		ts, _ := time.Parse(time.RFC3339, head.CreatedAt)
 		messages := 0
+		title := ""
 		for _, r := range recs[1:] {
-			if r.Type == TypeMessage {
+			switch r.Type {
+			case TypeMessage:
 				messages++
+			case TypeMeta:
+				if r.Event == metaTitleEvent {
+					title = r.Value
+				}
 			}
 		}
 		infos = append(infos, Info{
 			ID: head.ID, Path: p,
 			Model: head.Model, Provider: head.Provider, Mode: head.Mode,
-			CreatedAt: ts, Messages: messages,
+			Title: title, CreatedAt: ts, Messages: messages,
 		})
 		if st != nil {
 			infos[len(infos)-1].CreatedAt = st.ModTime()
@@ -163,18 +180,36 @@ func (m *Manager) open(path string) (*Session, error) {
 	}
 
 	head := recs[0]
-	// 只保留模型相关记录（meta 不进入 History，与 Append 行为一致）
+	// 只保留模型相关记录（meta 不进入 History，与 Append 行为一致）；
+	// meta 中恢复会话标题（title 事件）；旧会话无 title meta 时
+	// 从历史首条用户消息补提取（仅内存，不落盘）。
 	var hist []Record
+	title := ""
+	titleSet := false
 	for _, r := range recs[1:] {
 		switch r.Type {
 		case TypeMessage, TypeToolCall, TypeToolResult:
 			hist = append(hist, r)
+		case TypeMeta:
+			if r.Event == metaTitleEvent {
+				title = r.Value
+				titleSet = true
+			}
+		}
+	}
+	if !titleSet {
+		for _, r := range hist {
+			if r.Type == TypeMessage && r.Role == "user" {
+				title = extractTitle(r.Content)
+				titleSet = true
+				break
+			}
 		}
 	}
 	s := &Session{
 		ID: head.ID, Path: path, file: f,
 		Mode: head.Mode, Model: head.Model, Provider: head.Provider,
-		History: hist,
+		Title: title, History: hist, titleSet: titleSet,
 	}
 	return s, nil
 }

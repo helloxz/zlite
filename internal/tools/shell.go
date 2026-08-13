@@ -12,14 +12,17 @@ import (
 	"github.com/zendev-sh/goai"
 )
 
-const defaultCmdTimeout = 30 // 秒
+const (
+	defaultCmdTimeout = 30  // 秒
+	maxCmdTimeout     = 120 // 秒
+)
 
 // readOnlyCommands 是 plan 模式下允许的命令白名单。
 var readOnlyCommands = map[string]bool{
 	"ls": true, "pwd": true, "cat": true, "head": true, "tail": true,
 	"wc": true, "find": true, "grep": true, "rg": true, "which": true,
-	"file": true, "stat": true, "du": true, "df": true, "echo": true,
-	"date": true, "whoami": true, "uname": true, "env": true,
+	"ps": true, "file": true, "stat": true, "du": true, "df": true,
+	"echo": true, "date": true, "whoami": true, "uname": true, "env": true,
 }
 
 // gitReadOnlySubcommands 是 plan 模式下允许的 git 只读子命令。
@@ -39,14 +42,14 @@ var forbiddenShellChars = regexp.MustCompile(`[>;&|$\x60\n]`)
 
 type runCommandInput struct {
 	Command  string `json:"command" jsonschema:"description=要执行的命令"`
-	TimeoutS int    `json:"timeout_s,omitempty" jsonschema:"description=超时秒数，默认 30"`
+	TimeoutS int    `json:"timeout_s,omitempty" jsonschema:"description=超时秒数，默认 30，最大 120"`
 }
 
 // ---- plan 模式：只读白名单版 ----
 
 func runCommandPlanTool(cwd string) Tool {
 	return Tool{
-		GoAITool: goai.NewTool("run_command", "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。",
+		GoAITool: goai.NewTool("run_command", "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/ps/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。",
 			func(ctx context.Context, in runCommandInput) (string, error) {
 				if in.Command == "" {
 					return "", fmt.Errorf("command 不能为空")
@@ -82,12 +85,20 @@ func runCommandBuildTool(cwd string, confirm []string) Tool {
 	}
 }
 
+// normalizeCommandTimeout 将模型传入的超时限制在安全范围内。
+func normalizeCommandTimeout(timeoutS int) int {
+	if timeoutS <= 0 {
+		return defaultCmdTimeout
+	}
+	if timeoutS > maxCmdTimeout {
+		return maxCmdTimeout
+	}
+	return timeoutS
+}
+
 // executeShell 执行命令并返回输出（超时控制）。
 func executeShell(ctx context.Context, cwd, command string, timeoutS int) (string, error) {
-	timeout := timeoutS
-	if timeout <= 0 {
-		timeout = defaultCmdTimeout
-	}
+	timeout := normalizeCommandTimeout(timeoutS)
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
