@@ -20,10 +20,11 @@ type Record struct {
 	Type string `json:"type"`
 
 	// message 记录
-	ID      string `json:"id,omitempty"`
-	Role    string `json:"role,omitempty"` // user | assistant
-	Content string `json:"content,omitempty"`
-	Usage   *Usage `json:"usage,omitempty"` // assistant 消息的 token 用量
+	ID        string `json:"id,omitempty"`
+	Role      string `json:"role,omitempty"` // user | assistant
+	Content   string `json:"content,omitempty"`
+	Reasoning string `json:"reasoning,omitempty"` // assistant 的思考内容（思维链，仅展示用，不进模型上下文）
+	Usage     *Usage `json:"usage,omitempty"`     // assistant 消息的 token 用量
 
 	// tool_call / tool_result 记录（按 CallID 配对）
 	CallID     string         `json:"call_id,omitempty"`

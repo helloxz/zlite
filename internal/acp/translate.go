@@ -75,9 +75,16 @@ func (a *Agent) translate(st *sessionState, ev agent.Event) {
 				SessionUpdate: "current_mode_update",
 			}},
 		})
+	case agent.ReasoningDeltaEvent:
+		// 思考内容增量（模型 reasoning_content）→ agent_thought_chunk，
+		// 客户端可流式展示思维链
+		_ = a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+			SessionId: st.sid,
+			Update:    acpsdk.UpdateAgentThoughtText(e.Text),
+		})
 	}
 	// ThinkingStartEvent / DoneEvent / TextDoneEvent 不单独映射：
-	// 思考内容不落盘（无增量可发）；结束以 Prompt 响应（stopReason）表达。
+	// 思考开始状态由 thought chunk 本身表达；结束以 Prompt 响应（stopReason）表达。
 }
 
 // toolTitle 生成工具调用的展示标题（当前直接用工具名）。

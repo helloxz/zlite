@@ -205,6 +205,7 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 
 	// 消费流
 	var fullText strings.Builder
+	var fullReasoning strings.Builder
 	var usage llm.Usage
 	thinkingStarted := false // 已广播 ThinkingStartEvent（仅首个 reasoning 增量触发一次）
 	for ch := range stream.Chunks() {
@@ -212,12 +213,15 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 		case ch.Err != nil:
 			return ch.Err
 		case ch.Reasoning != "":
-			// 思考增量：仅广播一次 Start（思考内容不落盘），
-			// UI 据此把 [processing...] 切换为 [thinking...]。
+			// 思考增量：首个触发 ThinkingStartEvent（UI 切换 [thinking...]），
+			// 每个增量广播 ReasoningDeltaEvent（ACP 层转 agent_thought_chunk），
+			// 并累积拼接供落盘（reasoning 不进模型上下文，仅展示/回放用）。
 			if !thinkingStarted {
 				thinkingStarted = true
 				a.emit(ThinkingStartEvent{})
 			}
+			fullReasoning.WriteString(ch.Reasoning)
+			a.emit(ReasoningDeltaEvent{Text: ch.Reasoning})
 		case ch.Text != "":
 			fullText.WriteString(ch.Text)
 			a.emit(TextDeltaEvent{Text: ch.Text})
@@ -232,7 +236,7 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 	}
 
 	a.emit(TextDoneEvent{FullText: fullText.String()})
-	if err := a.sess.AppendAssistant(fullText.String(), &usage); err != nil {
+	if err := a.sess.AppendAssistant(fullText.String(), fullReasoning.String(), &usage); err != nil {
 		return fmt.Errorf("保存助手回复失败: %w", err)
 	}
 	a.emit(DoneEvent{Usage: usage})

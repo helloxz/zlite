@@ -78,13 +78,15 @@ func extractTitle(content string) string {
 	return string(runes[:maxTitleRunes]) + "…"
 }
 
-// AppendAssistant 记录助手回复（含 token 用量）。
-func (s *Session) AppendAssistant(content string, u *llm.Usage) error {
+// AppendAssistant 记录助手回复（含 token 用量与思考内容）。
+// reasoning 为思维链（模型 reasoning_content 增量拼接），仅落盘供展示/回放，
+// 不参与模型上下文（ToMessages 不包含）。
+func (s *Session) AppendAssistant(content, reasoning string, u *llm.Usage) error {
 	var usage *Usage
 	if u != nil {
 		usage = &Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, TotalTokens: u.TotalTokens}
 	}
-	return s.Append(Record{Type: TypeMessage, Role: "assistant", Content: content, Usage: usage})
+	return s.Append(Record{Type: TypeMessage, Role: "assistant", Content: content, Reasoning: reasoning, Usage: usage})
 }
 
 // AppendToolCall 记录工具调用。

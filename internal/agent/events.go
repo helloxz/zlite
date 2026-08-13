@@ -34,6 +34,13 @@ type ModeChangeEvent struct{ Mode Mode }
 // UI 据此把生成状态从 [processing...] 切换为 [thinking...]。
 type ThinkingStartEvent struct{}
 
+// ReasoningDeltaEvent 是思考内容增量（模型 reasoning_content 逐段产生）。
+// 内容透传给 UI/ACP 展示；TUI 当前不消费（保持 [thinking...] 状态），
+// ACP 翻译层转为 agent_thought_chunk 推给客户端。
+type ReasoningDeltaEvent struct {
+	Text string
+}
+
 // DoneEvent 是一轮对话结束（含 token 用量）。
 type DoneEvent struct{ Usage llm.Usage }
 
@@ -46,10 +53,11 @@ type ApprovalRequest struct {
 	Input   map[string]any
 }
 
-func (TextDeltaEvent) isEvent()     {}
-func (TextDoneEvent) isEvent()      {}
-func (ToolCallEvent) isEvent()      {}
-func (ToolResultEvent) isEvent()    {}
-func (ModeChangeEvent) isEvent()    {}
-func (ThinkingStartEvent) isEvent() {}
-func (DoneEvent) isEvent()          {}
+func (TextDeltaEvent) isEvent()      {}
+func (TextDoneEvent) isEvent()       {}
+func (ToolCallEvent) isEvent()       {}
+func (ToolResultEvent) isEvent()     {}
+func (ModeChangeEvent) isEvent()     {}
+func (ThinkingStartEvent) isEvent()  {}
+func (ReasoningDeltaEvent) isEvent() {}
+func (DoneEvent) isEvent()           {}

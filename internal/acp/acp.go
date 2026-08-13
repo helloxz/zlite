@@ -29,9 +29,12 @@ import (
 )
 
 // 会话配置选项 ID（client 经 session/set_config_option 切换）。
+// mode 选项是 Session Modes（NewSessionResponse.Modes）之外的双通道补充：
+// 兼容只实现 session/config 通道的客户端（官方分类 category="mode"）。
 const (
 	configOptionModel    = "model"
 	configOptionThinking = "thinking"
+	configOptionMode     = "mode"
 )
 
 // thinkingEfforts 是可选思考强度列表（与 TUI /thinking 保持一致）。
@@ -94,7 +97,8 @@ func (a *Agent) Attach(conn *acpsdk.AgentSideConnection) {
 // ---- 连接级方法 ----
 
 // Initialize 返回能力声明：会话方法全量支持（load/list/close/resume），
-// modes 与 config options 在 session/new、session/load 响应中返回。
+// modes 与 config options 在 session/new、session/load 响应中返回；
+// _meta 携带可用命令（slashCommands，供客户端连接初始化即展示）。
 func (a *Agent) Initialize(ctx context.Context, params acpsdk.InitializeRequest) (acpsdk.InitializeResponse, error) {
 	return acpsdk.InitializeResponse{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
@@ -153,6 +157,8 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 // LoadSession 加载已有会话（按 ACP session id = zlite id 查找 jsonl）。
 // 会话按 cwd 哈希分区存储，client 须传与创建时一致的 cwd（协议语义），
 // 不一致时自然 "session not found"。
+// 加载后回放历史消息（agent_message_chunk + agent_thought_chunk），
+// 客户端可展示历史对话与思维链。
 func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionRequest) (acpsdk.LoadSessionResponse, error) {
 	cwd, err := a.resolveCwd(params.Cwd)
 	if err != nil {
@@ -163,6 +169,7 @@ func (a *Agent) LoadSession(ctx context.Context, params acpsdk.LoadSessionReques
 		return acpsdk.LoadSessionResponse{}, err
 	}
 	a.sendAvailableCommands(st.sid)
+	a.replayHistory(st)
 	return acpsdk.LoadSessionResponse{
 		Modes:         modesState(st.zs.Mode),
 		ConfigOptions: a.configOptions(st),
@@ -180,6 +187,7 @@ func (a *Agent) ResumeSession(ctx context.Context, params acpsdk.ResumeSessionRe
 		return acpsdk.ResumeSessionResponse{}, err
 	}
 	a.sendAvailableCommands(st.sid)
+	a.replayHistory(st)
 	return acpsdk.ResumeSessionResponse{
 		Modes:         modesState(st.zs.Mode),
 		ConfigOptions: a.configOptions(st),
@@ -277,6 +285,12 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 	}
 	defer st.endTurn()
 
+	// 每次 turn 开始时重新通告可用命令（available_commands_update）：
+	// 兼容「会话创建时尚未注册通知 handler」的客户端（如 zacp 在首条
+	// prompt 前才注册），保证下一次 prompt 必然能捕获命令列表；
+	// 与创建/加载会话时的通告形成双保险，幂等无副作用。
+	a.sendAvailableCommands(st.sid)
+
 	text := extractPromptText(params.Prompt)
 	if strings.TrimSpace(text) == "" {
 		return acpsdk.PromptResponse{}, errors.New("prompt must contain text content")
@@ -328,6 +342,7 @@ func (a *Agent) SetSessionMode(ctx context.Context, params acpsdk.SetSessionMode
 // SetSessionConfigOption 设置会话配置选项：
 //   - model：切换模型（复用 llm.BuildModelNamed + agent.SetStreamer）
 //   - thinking：切换思考强度（agent.SetThinking）
+//   - mode：切换模式（与 session/set_mode 等效，双通道补充）
 //
 // 与 turn 互斥：持 st.mu 完成「busy 检查 + 切换」；响应组装（configOptions
 // 会再取 st.mu）在释放锁后进行。
@@ -369,6 +384,13 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 					return fmt.Errorf("unknown thinking effort: %s (available: %s)", name, strings.Join(thinkingEfforts, ", "))
 				}
 				st.ag.SetThinking(name)
+				return nil
+			case configOptionMode:
+				mode, err := agent.ParseMode(string(params.ValueId.Value))
+				if err != nil {
+					return err
+				}
+				st.ag.SetMode(mode) // 广播 ModeChangeEvent → current_mode_update
 				return nil
 			default:
 				return fmt.Errorf("unknown config option: %s", params.ValueId.ConfigId)
@@ -604,8 +626,10 @@ func modesState(current string) *acpsdk.SessionModeState {
 	}
 }
 
-// configOptions 返回会话配置选项：model 与 thinking 两个下拉选项，
+// configOptions 返回会话配置选项：model / thinking / mode 三个下拉选项，
 // client 经 session/set_config_option 切换。
+// mode 选项是 Session Modes 通道（NewSessionResponse.Modes）之外的双通道补充，
+// 顺序追加在末尾（model、thinking 之后），避免影响按索引读取的既有客户端。
 func (a *Agent) configOptions(st *sessionState) []acpsdk.SessionConfigOption {
 	modelOpts := make([]acpsdk.SessionConfigSelectOption, 0, len(a.opts.Provider.Models))
 	for _, m := range a.opts.Provider.Models {
@@ -615,15 +639,22 @@ func (a *Agent) configOptions(st *sessionState) []acpsdk.SessionConfigOption {
 	for _, t := range thinkingEfforts {
 		thinkingOpts = append(thinkingOpts, acpsdk.SessionConfigSelectOption{Name: t, Value: acpsdk.SessionConfigValueId(t)})
 	}
+	modeOpts := []acpsdk.SessionConfigSelectOption{
+		{Name: "plan", Value: "plan"},
+		{Name: "build", Value: "build"},
+	}
 
 	catModel := acpsdk.SessionConfigOptionCategoryModel
 	catThought := acpsdk.SessionConfigOptionCategoryThoughtLevel
+	catMode := acpsdk.SessionConfigOptionCategoryMode
 	modelSel := acpsdk.SessionConfigSelectOptionsUngrouped(modelOpts)
 	thinkingSel := acpsdk.SessionConfigSelectOptionsUngrouped(thinkingOpts)
-	// model 与 thinking 当前值可能被并发的 set_config_option 修改，锁内读取
+	modeSel := acpsdk.SessionConfigSelectOptionsUngrouped(modeOpts)
+	// 当前值可能被并发的 set_config_option 修改，锁内读取
 	st.mu.Lock()
 	currentModel := st.model
 	currentThinking := st.ag.Thinking()
+	currentMode := st.ag.Mode()
 	st.mu.Unlock()
 	return []acpsdk.SessionConfigOption{
 		{Select: &acpsdk.SessionConfigOptionSelect{
@@ -643,6 +674,15 @@ func (a *Agent) configOptions(st *sessionState) []acpsdk.SessionConfigOption {
 			Description:  acpsdk.Ptr("Reasoning effort for the model (auto = let the API decide)"),
 			CurrentValue: acpsdk.SessionConfigValueId(currentThinking),
 			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &thinkingSel},
+		}},
+		{Select: &acpsdk.SessionConfigOptionSelect{
+			Id:           configOptionMode,
+			Name:         "Mode",
+			Type:         "select",
+			Category:     &catMode,
+			Description:  acpsdk.Ptr("Agent mode: plan (read-only) or build (full, with approval)"),
+			CurrentValue: acpsdk.SessionConfigValueId(currentMode),
+			Options:      acpsdk.SessionConfigSelectOptions{Ungrouped: &modeSel},
 		}},
 	}
 }
@@ -666,6 +706,34 @@ func (a *Agent) sendAvailableCommands(sid acpsdk.SessionId) {
 			SessionUpdate: "available_commands_update",
 		}},
 	})
+}
+
+// replayHistory 在会话加载/恢复时把历史 assistant 消息回放为 session/update
+// 通知（agent_message_chunk + agent_thought_chunk），客户端可展示历史对话
+// 与思维链（与 reasonix 等 agent 行为一致，zacp 的 mutedSessions 机制即为
+// 此类回放设计）。reasoning 已落盘于 jsonl，回放不会进入模型上下文。
+func (a *Agent) replayHistory(st *sessionState) {
+	if a.conn == nil {
+		return
+	}
+	ctx := context.Background()
+	for _, r := range st.zs.History {
+		if r.Type != session.TypeMessage || r.Role != "assistant" {
+			continue
+		}
+		if r.Content != "" {
+			_ = a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+				SessionId: st.sid,
+				Update:    acpsdk.UpdateAgentMessageText(r.Content),
+			})
+		}
+		if r.Reasoning != "" {
+			_ = a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+				SessionId: st.sid,
+				Update:    acpsdk.UpdateAgentThoughtText(r.Reasoning),
+			})
+		}
+	}
 }
 
 // ---- 内部：消息处理 ----

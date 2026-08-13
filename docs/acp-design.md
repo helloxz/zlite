@@ -39,12 +39,15 @@ ACP client (editor)  ←──stdio──→  cmd/zlite runACP
 | agent 事件 | ACP update | 说明 |
 |---|---|---|
 | `TextDeltaEvent` | `agent_message_chunk` | 流式文本增量 |
+| `ReasoningDeltaEvent` | `agent_thought_chunk` | 思考内容增量（模型 reasoning_content），客户端可流式展示思维链 |
 | `ToolCallEvent` | `tool_call` | status=in_progress，kind 按工具名映射（read/search/execute/edit/delete/fetch/other） |
 | `ToolResultEvent` | `tool_call_update` | completed / failed，content 为输出文本 |
 | `ModeChangeEvent` | `current_mode_update` | session/set_mode 或加载会话时触发 |
-| `ThinkingStartEvent` | （不映射） | 思考内容不落盘，无增量可发 |
+| `ThinkingStartEvent` | （不映射） | 思考开始状态由 thought chunk 本身表达；TUI 据此切换 [thinking...] |
 | `DoneEvent` | （不映射） | 结束以 Prompt 响应 `stopReason` 表达 |
 | `ApprovalRequest`（Approver 接口） | `permission_request` | 同步等待 client 响应；`allow_once` / `reject_once` 两个选项；ctx 取消视为拒绝 |
+
+**思维链（reasoning）数据流**：模型 `reasoning_content` → `llm.Chunk.Reasoning` → `ReasoningDeltaEvent`（agent 事件流）→ `agent_thought_chunk`（ACP 推送）+ 拼接落盘 jsonl（`Record.Reasoning`）。**不进模型上下文**（`ToMessages` 不含）；`LoadSession / ResumeSession` 时回放历史（文本 + 思维链）供客户端展示历史（与 reasonix 行为一致；zacp 的 mutedSessions 机制即为此类回放设计）。TUI 保持现状：仅 [thinking...] 状态，不展示内容。
 
 ## 4. 能力声明（Initialize）
 
@@ -57,17 +60,19 @@ ACP client (editor)  ←──stdio──→  cmd/zlite runACP
 
 | 项 | 机制 | 值 | 切换方法 |
 |---|---|---|---|
-| mode（plan/build） | 官方稳定 `Session Modes`（`NewSessionResponse.Modes`） | `{plan, build}` | `session/set_mode` → `agent.SetMode` |
+| mode（plan/build） | **双通道**：官方稳定 `Session Modes`（`NewSessionResponse.Modes`）+ `session/config` select 选项（`id="mode"`，`category="mode"`，追加在 configOptions 末尾） | `{plan, build}` | `session/set_mode` 或 `session/set_config_option`（等效，均经 `agent.SetMode`） |
 | model 列表 | `session/config` select（**UNSTABLE**） | `providers[0].models` | `session/set_config_option` → `llm.BuildModelNamed` + `agent.SetStreamer` |
 | thinking 强度 | `session/config` select（**UNSTABLE**） | `[none, auto, low, medium, high, xhigh, max]` | 同上 → `agent.SetThinking` |
 
-- config option 使用官方语义分类：`model` / `thought_level`。
+- config option 使用官方语义分类：`mode` / `model` / `thought_level`。
+- **双通道策略**：mode 同时通过 `Modes` 字段（标准、较新）与 configOptions（兼容只实现 `session/config` 通道的客户端）返回，两通道状态始终一致（`currentValue` 读 `agent.Mode()`）；`SetSessionConfigOption` 的 `mode` 分支与 `session/set_mode` 等效，切换均广播 `current_mode_update`。
 - 切换类调用在 turn 进行中（busy）时返回错误（与 TUI busy 拒绝语义一致），由 client 重试。
 - **风险**：`session/config` 相关类型在 SDK 中标记 UNSTABLE（协议演进中）；v0.13.5 已生成完整代码且 claude-code 等实现使用，升级 SDK 时需回归此部分。
 
 ## 6. 可用命令
 
-- 创建/加载会话后推送一次 `available_commands_update`：仅 `init`（对应 `/init`，命令名不带斜杠，斜杠由 client 展示层添加；`input` 为可选参数 `hint`）。
+- **双通道**：
+  - 标准通道：创建/加载会话时**以及每次 prompt（turn 开始）时**推送 `available_commands_update`（`name: "init"`，不带斜杠，斜杠由 client 展示层添加；`input` 为可选参数 `hint`）。turn 开始时重发是为兼容「会话创建时尚未注册通知 handler」的客户端（如 zacp 在首条 prompt 前才注册回调，创建时的通告会被丢弃），保证命令列表不丢失；幂等无副作用。
 - 执行通道：client 把命令作为普通文本发给 `session/prompt`（`"/init"` 或 `"/init <要求>"`），agent 检测前缀后走 `RunInit`，与 TUI `/init` 行为一致（整条消息记入会话）。
 
 ## 7. 权限确认
