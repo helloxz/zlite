@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
@@ -21,6 +22,7 @@ import (
 // Agent 是一轮轮对话的执行者。
 type Agent struct {
 	cfg      *config.Config
+	mu       sync.Mutex // 保护 streamer（/switch 与 runOnce 并发替换/读取）
 	streamer llm.Streamer
 	registry *tools.Registry
 	sess     *session.Session
@@ -59,6 +61,15 @@ func (a *Agent) SetSession(sess *session.Session) {
 		a.sess.Close()
 	}
 	a.sess = sess
+}
+
+// SetStreamer 替换底层模型流（/switch 命令用）。
+// 加锁保证与 runOnce 的并发读取安全；正在进行的生成继续使用旧模型流，
+// 替换从下一轮生成开始生效。
+func (a *Agent) SetStreamer(s llm.Streamer) {
+	a.mu.Lock()
+	a.streamer = s
+	a.mu.Unlock()
 }
 
 // SetMode 切换模式并广播事件。
@@ -115,7 +126,12 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 	// 组装请求
 	toolList := a.registry.ForMode(tools.Mode(a.mode))
 
-	stream, err := a.streamer.StreamText(ctx, llm.StreamRequest{
+	// 锁内取当前模型流：/switch 可并发替换，正在进行的生成不受影响
+	a.mu.Lock()
+	streamer := a.streamer
+	a.mu.Unlock()
+
+	stream, err := streamer.StreamText(ctx, llm.StreamRequest{
 		System:   system,
 		Messages: history,
 		Tools:    toolList,

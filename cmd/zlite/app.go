@@ -125,6 +125,20 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	return rt, nil
 }
 
+// switchModel 切换当前模型（/switch 命令用）：按名重建模型并注入 agent，
+// 更新 modelName，并在会话中留痕。name 须来自配置的模型列表（TUI 已校验）。
+// 调用方须保证 agent 空闲（TUI 在 busy 时拒绝 /switch）。
+func (rt *runtime) switchModel(name string) error {
+	m, err := llm.BuildModelNamed(rt.p, name)
+	if err != nil {
+		return err
+	}
+	rt.ag.SetStreamer(llm.Bind(m))
+	rt.modelName = name
+	_ = rt.sess.AppendMeta("model_change", name) // 落盘留痕；meta 失败不影响切换
+	return nil
+}
+
 // runWithConfig 正常启动（配置已就绪）。
 func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 	rt, err := buildRuntime(cfgPath, cfg, opts)
@@ -162,6 +176,7 @@ func runWithSetup(cfgPath string, opts options) error {
 		// 3. 热重载进现有 TUI（不重启进程）
 		t.SetAgent(rt.ag)
 		t.SetModel(rt.modelName)
+		t.SetSwitchModel(rt.p.Models, rt.switchModel)
 		t.SetNewSession(func() error {
 			ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
 			if err != nil {
@@ -193,6 +208,7 @@ func startTUI(rt *runtime, opts options) error {
 		return nil
 	}
 	t := tui.New(rt.cfg, rt.ag, rt.modelName, rt.cwd, newSession)
+	t.SetSwitchModel(rt.p.Models, rt.switchModel)
 	if rt.apUI != nil {
 		rt.apUI.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/awesome-gocui/gocui"
@@ -39,6 +40,13 @@ type TUI struct {
 	// newSession 创建新会话并切换到它（/new 命令用，由 app.go 注入；
 	// TUI 不持有 session 管理逻辑，保持零业务）。
 	newSession func() error
+
+	// models 是可选模型列表（/switch 用，来自配置 providers[0].models）；
+	// switchModel 执行实际切换（app.go 注入：重建模型流并注入 agent）。
+	models      []string
+	switchModel func(name string) error
+	// pickerSel 是模型选择弹窗的当前选中行（仅主循环线程读写）。
+	pickerSel int
 
 	// setupNeeded 为 true 时进入首次配置引导（type → base_url → api_key → models），
 	// 完成后调用 onSetupDone 落盘并热重载（app.go 注入）。
@@ -109,6 +117,13 @@ func (t *TUI) SetModel(name string) {
 // SetNewSession 替换 /new 回调（引导完成热重载后调用）。
 func (t *TUI) SetNewSession(fn func() error) {
 	t.newSession = fn
+}
+
+// SetSwitchModel 配置 /switch 命令：models 为可选模型列表（来自配置
+// providers[0].models），fn 执行实际切换（由 app.go 注入）。
+func (t *TUI) SetSwitchModel(models []string, fn func(name string) error) {
+	t.models = models
+	t.switchModel = fn
 }
 
 // ui 把 UI 更新任务加入串行队列（FIFO，顺序保证）。
@@ -211,6 +226,21 @@ func (t *TUI) layout(g *gocui.Gui) error {
 		t.chat.appendSystem("zlite ready - " + t.cwd)
 	}
 
+	// 模型选择弹窗 view 常驻（启动时创建一次，Visible=false 隐藏）：
+	// 运行期只切 Visible/坐标，不增删 g.views——gocui 的 loaderTick 会
+	// 并发遍历 views，增删存在数据竞争（见 model_picker.go 注释）。
+	if _, err := g.View(modelPickerViewName); err != nil {
+		v, err := g.SetView(modelPickerViewName, 0, 0, 1, 1, 0)
+		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
+			return err
+		}
+		v.Visible = false
+		v.Title = " Select model "
+		v.Highlight = true // 光标所在行用 Sel 配色高亮
+		v.SelBgColor = gocui.ColorCyan
+		v.SelFgColor = gocui.ColorBlack
+	}
+
 	return nil
 }
 
@@ -238,6 +268,11 @@ func (t *TUI) submit(g *gocui.Gui, v *gocui.View) error {
 		t.chat.appendSystem("(still processing the previous message, please wait)")
 		return nil
 	}
+	// 同步置位 busy 并显示用户消息（主循环线程）：runAgent 在后台
+	// goroutine 运行，若经异步 ui 队列置位，后续 /switch 的 busy 检查
+	// 存在 TOCTOU 窗口。
+	t.status.setBusy(true)
+	t.chat.appendUser(msg)
 	go t.runAgent(msg)
 	return nil
 }
@@ -260,12 +295,8 @@ func (t *TUI) handleApproval(msg string) error {
 	return nil
 }
 
-// runAgent 在后台执行一轮对话。
+// runAgent 在后台执行一轮对话（busy 与用户消息已由 submit 同步处理）。
 func (t *TUI) runAgent(msg string) {
-	t.ui(func() {
-		t.chat.appendUser(msg)
-		t.status.setBusy(true)
-	})
 	err := t.agent.Run(t.ctx, msg)
 	t.ui(func() {
 		t.status.setBusy(false)
@@ -287,6 +318,8 @@ func (t *TUI) handleCommand(cmd string) error {
 		t.switchMode(agent.ModePlan)
 	case "/build":
 		t.switchMode(agent.ModeBuild)
+	case "/switch":
+		return t.handleSwitch(args)
 	case "/init":
 		return t.initProject(args)
 	case "/help":
@@ -294,6 +327,38 @@ func (t *TUI) handleCommand(cmd string) error {
 	default:
 		t.chat.appendSystem("Unknown command: " + cmd + " (type /help for available commands)")
 	}
+	return nil
+}
+
+// handleSwitch 处理 /switch：带参数直接切换；无参数弹出模型选择列表。
+// 与 /new 一致：agent 忙碌时拒绝，避免替换 streamer 与生成中的 runOnce 竞争。
+func (t *TUI) handleSwitch(args string) error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	if t.switchModel == nil {
+		t.chat.appendSystem(colorize("Error: /switch is unavailable", ansiRed))
+		return nil
+	}
+	if args == "" {
+		return t.openModelPicker()
+	}
+	return t.switchToModel(args)
+}
+
+// switchToModel 校验模型名并执行切换（弹窗确认与 /switch <name> 共用）。
+func (t *TUI) switchToModel(name string) error {
+	if !slices.Contains(t.models, name) {
+		t.chat.appendSystem(colorize("Unknown model: "+name+" (available: "+strings.Join(t.models, ", ")+")", ansiRed))
+		return nil
+	}
+	if err := t.switchModel(name); err != nil {
+		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		return nil
+	}
+	t.SetModel(name)
+	t.chat.appendSystem("Switched to model: " + name)
 	return nil
 }
 
@@ -322,13 +387,13 @@ func (t *TUI) initProject(args string) error {
 	if args != "" {
 		msg = "/init " + args // 附加要求作为用户消息传给模型（会话记录完整）
 	}
+	t.status.setBusy(true) // 同步置位（同 submit：消除 busy 检查的 TOCTOU 窗口）
 	go t.runInit(msg)
 	return nil
 }
 
-// runInit 在后台执行 init 任务。
+// runInit 在后台执行 init 任务（busy 已由 initProject 同步置位）。
 func (t *TUI) runInit(msg string) {
-	t.ui(func() { t.status.setBusy(true) })
 	err := t.agent.RunInit(t.ctx, msg)
 	t.ui(func() {
 		t.status.setBusy(false)
@@ -423,6 +488,7 @@ const helpText = `Available commands:
   /new     Start a new session (mode resets to plan)
   /plan    Switch to plan mode (read-only: inspect and search only)
   /build   Switch to build mode (writable: modify files, run commands)
+  /switch  Switch model (pick from the list, or /switch <model>)
   /exit    Quit zlite
   /help    Show this help
 
