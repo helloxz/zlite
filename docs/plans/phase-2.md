@@ -11,9 +11,7 @@
 > - ✅ run_command 双模式（plan 只读白名单 / build 全量 + 危险命令检测）
 > - ✅ 危险命令 TUI 内联确认（tui.Approver，y/n 决策，无需覆盖层）
 > - ✅ 用户拒绝 → "用户拒绝了该操作" 返回模型，模型可调整方案
->
-> 剩余可选项（不再必需，因写操作不确认）：
-- [ ] （可选）写操作前的 unified diff 预览（如未来恢复确认机制再引入 `gotextdiff`）
+
 
 ### P2. skills（兼容 Claude Code 格式）
 
@@ -29,8 +27,6 @@
 ### P3. 会话管理增强
 
 - [ ] `zlite -l` 交互式会话列表选择（方向键 + Enter，复用 confirm_view 的覆盖层模式）
-- [ ] 上下文管理细化：按估算 token 截断（保留 system + 最近工具结果，中段摘要占位）；用模型返回的真实 usage 校准估算
-- [ ] `session.keep` 生效：超出保留数的旧会话文件归档到 `.archive/`
 - [ ] 多行输入（可选优化）：自写 gocui Editor，Alt+Enter 换行、Enter 提交
 
 ### P4. ACP 协议支持（核心预留落地）
@@ -78,9 +74,3 @@
 - 会话加密、团队共享
 - 图形化 diff（终端内字符级 diff 可视化为可选增强）
 
-## 4. 三期候选（不承诺）
-
-- MCP client（goai 内置，接入成本低）
-- 流式 token 计费统计
-- `--non-interactive` / 管道输入模式（脚本化）
-- 内置 skill 市场下载

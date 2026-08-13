@@ -40,6 +40,11 @@ func (s *statusView) setBusy(b bool) {
 	s.render()
 }
 
+func (s *statusView) setModel(m string) {
+	s.model = m
+	s.render()
+}
+
 // title 生成状态栏文本（纯文本，不嵌 ANSI——边框绘制不解析转义）。
 func (s *statusView) title() string {
 	busy := ""

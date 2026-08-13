@@ -23,99 +23,178 @@ type options struct {
 	list bool   // -l
 }
 
+// runtime 是一次运行所需的组件集合（run 与引导热重载共用）。
+type runtime struct {
+	cfg       *config.Config
+	p         *config.Provider
+	mode      agent.Mode
+	modelName string
+	cwd       string
+	mgr       *session.Manager
+	reg       *tools.Registry
+	sess      *session.Session
+	ag        *agent.Agent
+	apUI      *tui.Approver // 非 nil 表示 TUI 内联确认器
+}
+
 // run 组装并启动 zlite：config → llm → tools → session → agent → tui。
+// 配置缺失或需要引导时进入 TUI 引导流程（完成后热重载，不重启）。
 func run(opts options) error {
-	// 1. 配置
 	cfgPath, err := config.DefaultPath()
 	if err != nil {
 		return err
 	}
 	cfg, err := config.Load(cfgPath)
 	if errors.Is(err, config.ErrConfigNotFound) {
-		if werr := config.WriteTemplate(cfgPath); werr != nil {
-			return werr
-		}
-		return fmt.Errorf("首次运行：已生成配置模板 %s\n请编辑后重新运行（api_key 可用环境变量 ${ZLITE_API_KEY} 引用）", cfgPath)
+		return runWithSetup(cfgPath, opts)
 	}
 	if err != nil {
 		return err
 	}
+	if cfg.NeedsSetup() {
+		return runWithSetup(cfgPath, opts)
+	}
+	return runWithConfig(cfgPath, opts, cfg)
+}
 
+// buildRuntime 组装运行期组件（run 与引导热重载共用）。
+// opts.list 时仅构建 mgr/cwd（不创建会话），由调用方打印列表。
+func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, error) {
 	p, err := cfg.DefaultProvider()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// 2. 模式（命令行覆盖配置文件）
+	// 模式（命令行覆盖配置文件）
 	modeStr := cfg.Agent.Mode
 	if opts.mode != "" {
 		modeStr = opts.mode
 	}
 	mode, err := agent.ParseMode(modeStr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// 3. 模型
-	model, err := llm.BuildModel(p)
+	// 模型
+	m, err := llm.BuildModel(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	streamer := llm.Bind(model)
+	streamer := llm.Bind(m)
 
-	// 4. 工作目录与工具
+	// 工作目录与工具
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	reg := tools.New(cwd, cfg.Shell.ConfirmCommands)
 
-	// 5. 会话
+	// 会话
 	mgr := session.NewManager(filepath.Join(filepath.Dir(cfgPath), "sessions"))
+
+	// 确认器：auto_approve=true 自动批准；否则危险命令经 TUI 内联确认。
+	// 写文件工具（write_file/edit_file/delete）按用户决策直接执行，不经过确认。
+	var approver agent.Approver
+	var apUI *tui.Approver
+	if cfg.Agent.AutoApprove {
+		approver = agent.NewApprover(true)
+	} else {
+		apUI = &tui.Approver{}
+		approver = apUI
+	}
+
+	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: p.Models[0], cwd: cwd, mgr: mgr, reg: reg, apUI: apUI}
 	if opts.list {
-		return listSessions(mgr, cwd)
+		return rt, nil // 列表模式不创建会话
 	}
 
 	var sess *session.Session
 	if opts.cont {
 		sess, err = mgr.Continue(cwd)
 		if errors.Is(err, session.ErrNoSession) {
-			return fmt.Errorf("当前目录没有可继续的会话（直接运行 zlite 开始新会话）")
+			return nil, fmt.Errorf("当前目录没有可继续的会话（直接运行 zlite 开始新会话）")
 		}
 	} else {
 		sess, err = mgr.Create(cwd, p, string(mode))
 	}
 	if err != nil {
+		return nil, err
+	}
+	rt.sess = sess
+	rt.ag = agent.New(cfg, streamer, reg, sess, approver, cwd, mode)
+	return rt, nil
+}
+
+// runWithConfig 正常启动（配置已就绪）。
+func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
+	rt, err := buildRuntime(cfgPath, cfg, opts)
+	if err != nil {
 		return err
 	}
-	defer sess.Close()
-
-	// 6. agent + 确认器
-	// auto_approve=true 时自动批准（信任模式）；否则危险命令经 TUI 内联确认。
-	// 写文件工具（write_file/edit_file/delete）按用户决策直接执行，不经过确认。
-	var approver agent.Approver
-	if cfg.Agent.AutoApprove {
-		approver = agent.NewApprover(true)
-	} else {
-		approver = &tui.Approver{}
+	if opts.list {
+		return listSessions(rt.mgr, rt.cwd)
 	}
-	ag := agent.New(cfg, streamer, reg, sess, approver, cwd, mode)
+	defer rt.sess.Close()
+	return startTUI(rt, opts)
+}
 
-	// 7. TUI + 信号处理（SIGINT/SIGTERM 优雅退出，会话已实时落盘）
-	// newSession：/new 命令的会话切换回调（创建新会话并切换；defer 的 Close 会
-	// 关闭最终会话，旧会话由 agent.SetSession 关闭，Session.Close 幂等）。
-	newSession := func() error {
-		ns, err := mgr.Create(cwd, p, string(agent.ModePlan))
+// runWithSetup 首次运行或缺配置：进入 TUI 引导，完成后热重载直接进入对话。
+func runWithSetup(cfgPath string, opts options) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	t := tui.New(nil, nil, "", cwd, nil)
+	t.EnableSetup(func(in config.SetupInput) error {
+		// 1. 落盘（.env 存密钥，config.toml 只更新 providers 段）
+		if err := config.ApplySetup(cfgPath, in); err != nil {
+			return err
+		}
+		// 2. 重新加载配置并完整重建运行期组件
+		cfg, err := config.Load(cfgPath)
 		if err != nil {
 			return err
 		}
-		sess = ns
-		ag.SetSession(ns)
+		rt, err := buildRuntime(cfgPath, cfg, opts)
+		if err != nil {
+			return err
+		}
+		// 3. 热重载进现有 TUI（不重启进程）
+		t.SetAgent(rt.ag)
+		t.SetModel(rt.modelName)
+		t.SetNewSession(func() error {
+			ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
+			if err != nil {
+				return err
+			}
+			rt.sess = ns
+			rt.ag.SetSession(ns)
+			return nil
+		})
+		if rt.apUI != nil {
+			rt.apUI.Attach(t) // agent 晚于 TUI 创建，此处补绑确认器
+		}
+		return nil
+	})
+	return t.Run()
+}
+
+// startTUI 组装 TUI 并启动主循环（含 SIGINT/SIGTERM 优雅退出，会话已实时落盘）。
+func startTUI(rt *runtime, opts options) error {
+	// newSession：/new 命令的会话切换回调（创建新会话并切换；defer 的 Close 会
+	// 关闭最终会话，旧会话由 agent.SetSession 关闭，Session.Close 幂等）。
+	newSession := func() error {
+		ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
+		if err != nil {
+			return err
+		}
+		rt.sess = ns
+		rt.ag.SetSession(ns)
 		return nil
 	}
-	t := tui.New(cfg, ag, p.Models[0], cwd, newSession)
-	if ap, ok := approver.(*tui.Approver); ok {
-		ap.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
+	t := tui.New(rt.cfg, rt.ag, rt.modelName, rt.cwd, newSession)
+	if rt.apUI != nil {
+		rt.apUI.Attach(t) // agent 先于 TUI 创建，此处补绑确认器
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

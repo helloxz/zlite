@@ -207,6 +207,119 @@ func (c *Config) validate() error {
 
 var envPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
+// NeedsSetup 判断是否需要首次引导配置：
+// providers 为空、或第一个 provider 的 name 不是 "default"、或 api_key 为空（展开后）。
+// 注意：api_key = "${ZLITE_API_KEY}" 且 .env 已设置时，展开后非空，视为已配置。
+func (c *Config) NeedsSetup() bool {
+	if len(c.Providers) == 0 {
+		return true
+	}
+	p := c.Providers[0]
+	if p.Name != "default" {
+		return true
+	}
+	return p.APIKey == ""
+}
+
+// SetupInput 是一次引导配置的输入（ApplySetup 的入参）。
+type SetupInput struct {
+	Type    string // openai.chat | openai.responses
+	BaseURL string
+	APIKey  string
+	Models  []string
+}
+
+// SplitModels 把用户输入的模型列表拆为 []string：
+// 支持中英文逗号（, ，）分隔，自动去除空白字符与空项。
+func SplitModels(s string) []string {
+	var out []string
+	for _, m := range regexp.MustCompile(`[,，]`).Split(s, -1) {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ApplySetup 把引导结果写入磁盘：
+//   - api_key 追加/更新到配置文件同目录的 .env（ZLITE_API_KEY=...，0600），
+//     不覆盖 .env 中已有的其他变量；
+//   - config.toml 只更新 [[providers]] 段（保留 agent/shell/tui/session 等其他段），
+//     api_key 写 ${ZLITE_API_KEY} 占位，密钥不落盘到配置。
+//
+// 配置文件不存在时（首次运行）直接创建。
+func ApplySetup(path string, in SetupInput) error {
+	switch in.Type {
+	case TypeOpenAIChat, TypeOpenAIResponses:
+	default:
+		return fmt.Errorf("type 非法: %q（仅支持 %q / %q）", in.Type, TypeOpenAIChat, TypeOpenAIResponses)
+	}
+	if in.BaseURL == "" {
+		return errors.New("base_url 不能为空")
+	}
+	if in.APIKey == "" {
+		return errors.New("api_key 不能为空")
+	}
+	if len(in.Models) == 0 {
+		return errors.New("models 不能为空")
+	}
+
+	if err := writeDotEnvKey(filepath.Join(filepath.Dir(path), ".env"), "ZLITE_API_KEY", in.APIKey); err != nil {
+		return err
+	}
+
+	v := viper.New()
+	v.SetConfigFile(path)
+	if _, err := os.Stat(path); err == nil {
+		if err := v.ReadInConfig(); err != nil {
+			return fmt.Errorf("读取配置失败: %w", err)
+		}
+	}
+	v.Set("providers", []map[string]any{{
+		"name":     "default",
+		"type":     in.Type,
+		"base_url": in.BaseURL,
+		"api_key":  "${ZLITE_API_KEY}",
+		"models":   in.Models,
+	}})
+	if err := v.WriteConfigAs(path); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	_ = os.Chmod(path, 0o600)
+	return nil
+}
+
+// writeDotEnvKey 追加或更新 .env 中的 KEY=VALUE 行（保留其他行，权限 0600）。
+func writeDotEnvKey(path, key, value string) error {
+	var lines []string
+	if data, err := os.ReadFile(path); err == nil {
+		trimmed := strings.TrimRight(string(data), "\n")
+		if trimmed != "" {
+			lines = strings.Split(trimmed, "\n")
+		}
+	}
+	prefix := key + "="
+	found := false
+	for i, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			lines[i] = prefix + value
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, prefix+value)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("写入 .env 失败: %w", err)
+	}
+	return nil
+}
+
 // expandEnv 展开整串 ${VAR} 形式的环境变量引用；非该形式原样返回。
 // 一期仅支持整串引用（不含拼接），保证实现简单可预期。
 func expandEnv(s string) (string, error) {

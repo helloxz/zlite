@@ -8,3 +8,4 @@ bin/
 *.log
 *.swp
 .DS_Store
+*_test.go

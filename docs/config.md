@@ -1,6 +1,10 @@
 # zlite 配置文件说明
 
-配置文件默认位于 `~/.zlite/config.toml`（首次运行会提示生成模板）。
+配置文件默认位于 `~/.zlite/config.toml`。**首次运行（或配置不完整）时，
+zlite 会直接在 TUI 界面引导配置**：依次询问 type、base_url、api_key、models，
+完成后自动写入配置（api_key 存到 `~/.zlite/.env`）并热重载进入对话，无需重启。
+已配置完整（`name = "default"` 且 api_key 非空）时跳过引导。
+
 修改配置后需重启 zlite 生效。
 
 ## 密钥存放（~/.zlite/.env）

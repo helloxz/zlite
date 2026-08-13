@@ -32,13 +32,20 @@ const (
 // TUI 是终端界面。
 type TUI struct {
 	cfg   *config.Config
-	agent agentFace
+	agent agentFace // 引导完成前为 nil（首次配置流程）
 	model string
 	cwd   string
 
 	// newSession 创建新会话并切换到它（/new 命令用，由 app.go 注入；
 	// TUI 不持有 session 管理逻辑，保持零业务）。
 	newSession func() error
+
+	// setupNeeded 为 true 时进入首次配置引导（type → base_url → api_key → models），
+	// 完成后调用 onSetupDone 落盘并热重载（app.go 注入）。
+	setupNeeded bool
+	onSetupDone func(config.SetupInput) error
+	setupState  setupState
+	setupInput  config.SetupInput
 
 	g      *gocui.Gui
 	chat   *chatView
@@ -57,7 +64,6 @@ type TUI struct {
 	cancel context.CancelFunc
 }
 
-// New 创建 TUI。
 // New 创建 TUI。newSession 为 /new 命令的会话切换回调（可为 nil）。
 func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() error) *TUI {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,6 +73,42 @@ func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() e
 		uiTasks:    make(chan func(), 128),
 		ctx:        ctx, cancel: cancel,
 	}
+}
+
+// setupState 是首次配置引导的步骤状态机。
+type setupState int
+
+const (
+	setupNone setupState = iota
+	setupType
+	setupBaseURL
+	setupAPIKey
+	setupModels
+)
+
+// EnableSetup 启用首次配置引导（必须在 Run 前调用）。
+// onSetupDone 在引导完成后回调（落盘 + 热重载），返回错误则引导重新开始。
+func (t *TUI) EnableSetup(onSetupDone func(config.SetupInput) error) {
+	t.setupNeeded = true
+	t.onSetupDone = onSetupDone
+}
+
+// SetAgent 替换 agent（引导完成热重载后调用）。
+func (t *TUI) SetAgent(a agentFace) {
+	t.agent = a
+}
+
+// SetModel 更新状态栏模型名（引导完成热重载后调用）。
+func (t *TUI) SetModel(name string) {
+	t.model = name
+	if t.status != nil {
+		t.status.setModel(name)
+	}
+}
+
+// SetNewSession 替换 /new 回调（引导完成热重载后调用）。
+func (t *TUI) SetNewSession(fn func() error) {
+	t.newSession = fn
 }
 
 // ui 把 UI 更新任务加入串行队列（FIFO，顺序保证）。
@@ -97,7 +139,13 @@ func (t *TUI) run(g *gocui.Gui) error {
 
 	t.setup(g)
 	go t.dispatch()
-	go t.consumeEvents()
+	if t.agent != nil {
+		go t.consumeEvents()
+	}
+	// 首次配置引导：等 MainLoop 首个循环创建好视图后启动（UpdateAsync 投递）
+	if t.setupNeeded {
+		g.UpdateAsync(func(*gocui.Gui) error { t.startSetup(); return nil })
+	}
 
 	if err := g.MainLoop(); err != nil && !errors.Is(err, gocui.ErrQuit) {
 		return err
@@ -178,6 +226,10 @@ func (t *TUI) submit(g *gocui.Gui, v *gocui.View) error {
 	// 待确认的危险操作：输入 y/n 决策
 	if t.approvalCh != nil {
 		return t.handleApproval(msg)
+	}
+	// 首次配置引导：拦截输入走引导状态机
+	if t.setupState != setupNone {
+		return t.handleSetup(msg)
 	}
 	if strings.HasPrefix(msg, "/") {
 		return t.handleCommand(msg)
@@ -308,6 +360,9 @@ func (t *TUI) newChat() error {
 
 // switchMode 切换模式并提示（Tab 与 /plan /build 共用）。
 func (t *TUI) switchMode(m agent.Mode) {
+	if t.agent == nil { // 引导完成前无 agent，忽略 Tab
+		return
+	}
 	if t.agent.Mode() == m {
 		return
 	}
@@ -372,3 +427,69 @@ const helpText = `Available commands:
   /help    Show this help
 
 Usage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.`
+
+// ---- 首次配置引导（setup state machine）----
+
+// startSetup 启动引导：输出欢迎语与第一步提问。
+// 仅在 MainLoop 首个循环后调用（chat view 已就绪）。
+func (t *TUI) startSetup() {
+	t.setupState = setupType
+	t.chat.appendSystem("Welcome to zlite! Let's configure your model provider.")
+	t.chat.appendSystem("Type: enter 1 for openai.chat, 2 for openai.responses:")
+}
+
+// handleSetup 按当前步骤处理用户输入（submit 拦截）。
+// api_key 必填（用户决策），其余非法输入提示重输；全部完成调用
+// onSetupDone 落盘并热重载，失败则引导从头再来。
+func (t *TUI) handleSetup(msg string) error {
+	switch t.setupState {
+	case setupType:
+		switch msg {
+		case "1":
+			t.setupInput.Type = config.TypeOpenAIChat
+		case "2":
+			t.setupInput.Type = config.TypeOpenAIResponses
+		default:
+			t.chat.appendSystem("Invalid choice. Enter 1 (openai.chat) or 2 (openai.responses):")
+			return nil
+		}
+		t.setupState = setupBaseURL
+		t.chat.appendSystem("Base URL (e.g. https://api.example.com/v1):")
+	case setupBaseURL:
+		if msg == "" {
+			t.chat.appendSystem("Base URL cannot be empty. Enter the endpoint base URL:")
+			return nil
+		}
+		t.setupInput.BaseURL = msg
+		t.setupState = setupAPIKey
+		t.chat.appendSystem("API key (saved to ~/.zlite/.env as ZLITE_API_KEY):")
+	case setupAPIKey:
+		if msg == "" {
+			t.chat.appendSystem("API key cannot be empty. Enter your API key:")
+			return nil
+		}
+		t.setupInput.APIKey = msg
+		t.setupState = setupModels
+		t.chat.appendSystem("Model(s), comma separated (e.g. gpt-4o, gpt-4o-mini):")
+	case setupModels:
+		models := config.SplitModels(msg)
+		if len(models) == 0 {
+			t.chat.appendSystem("At least one model is required. Enter model(s), comma separated:")
+			return nil
+		}
+		t.setupInput.Models = models
+		t.setupState = setupNone
+		t.status.setBusy(true)
+		err := t.onSetupDone(t.setupInput)
+		t.status.setBusy(false)
+		if err != nil {
+			t.chat.appendSystem(colorize("Setup failed: "+err.Error(), ansiRed))
+			t.chat.appendSystem("Let's try again. Type: enter 1 for openai.chat, 2 for openai.responses:")
+			t.setupState = setupType
+			t.setupInput = config.SetupInput{}
+			return nil
+		}
+		t.chat.appendSystem(colorize("Configuration saved. Happy coding!", ansiGreen))
+	}
+	return nil
+}
