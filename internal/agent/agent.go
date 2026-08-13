@@ -29,6 +29,9 @@ type Agent struct {
 	approver Approver
 	cwd      string
 	mode     Mode
+	// thinking 是思考强度（none/low/medium/high/xhigh/max），
+	// 空字符串表示 auto：不传 reasoning_effort，由 API 自行决定。
+	thinking string
 
 	events chan Event
 }
@@ -70,6 +73,24 @@ func (a *Agent) SetStreamer(s llm.Streamer) {
 	a.mu.Lock()
 	a.streamer = s
 	a.mu.Unlock()
+}
+
+// SetThinking 设置思考强度（/thinking 命令用）。
+// "auto" 归一化为空字符串：不传 reasoning_effort 参数，由 API 自行决定；
+// 其余值原样透传（是否支持由后端决定，错误会经流返回）。
+// 与 mode 一致：仅主循环线程修改、busy 时拒绝切换，无需加锁。
+func (a *Agent) SetThinking(t string) {
+	if t == "auto" {
+		t = ""
+	}
+	if a.thinking == t {
+		return
+	}
+	a.thinking = t
+	if t == "" {
+		t = "auto"
+	}
+	a.sess.AppendMeta("thinking_change", t)
 }
 
 // SetMode 切换模式并广播事件。
@@ -137,10 +158,11 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 	a.mu.Unlock()
 
 	stream, err := streamer.StreamText(ctx, llm.StreamRequest{
-		System:   system,
-		Messages: history,
-		Tools:    toolList,
-		MaxSteps: a.cfg.Agent.MaxSteps,
+		System:          system,
+		Messages:        history,
+		Tools:           toolList,
+		MaxSteps:        a.cfg.Agent.MaxSteps,
+		ReasoningEffort: a.thinking,
 		Hooks: llm.Hooks{
 			BeforeToolExecute: a.onBeforeToolExecute,
 			ToolResult:        a.onToolResult,

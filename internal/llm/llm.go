@@ -118,6 +118,10 @@ type StreamRequest struct {
 	Tools    []goai.Tool
 	MaxSteps int
 	Hooks    Hooks
+	// ReasoningEffort 是思考强度（none/low/medium/high/xhigh/max）。
+	// 空字符串表示不传参（auto），由 API 自行决定；其余值原样透传，
+	// 是否支持由后端决定（不支持时 API 报错，错误会经流返回给用户）。
+	ReasoningEffort string
 }
 
 // Model 包装 goai 的 provider.LanguageModel，并携带 API 格式信息
@@ -235,10 +239,19 @@ func StreamText(ctx context.Context, model *Model, req StreamRequest) (Stream, e
 		goai.WithMessages(ToProviderMessages(req.Messages)...),
 		goai.WithMaxSteps(req.MaxSteps),
 	}
+	// 请求级 provider options：useResponsesAPI 与 reasoning_effort 必须合并
+	// 为一张 map（goai 的 WithProviderOptions 是整体覆盖，多次调用互相覆盖）。
+	po := map[string]any{}
 	// Responses API 是请求级开关（goai 的 openai provider 默认开），
 	// 只在 type = openai.responses 时显式开启。
 	if model.resp {
-		opts = append(opts, goai.WithProviderOptions(map[string]any{"useResponsesAPI": true}))
+		po["useResponsesAPI"] = true
+	}
+	if req.ReasoningEffort != "" {
+		po["reasoning_effort"] = req.ReasoningEffort
+	}
+	if len(po) > 0 {
+		opts = append(opts, goai.WithProviderOptions(po))
 	}
 	if len(req.Tools) > 0 {
 		opts = append(opts, goai.WithTools(req.Tools...))

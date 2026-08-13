@@ -24,6 +24,7 @@ type agentFace interface {
 	RunInit(ctx context.Context, msg string) error
 	SetMode(m agent.Mode)
 	Mode() agent.Mode
+	SetThinking(t string)
 	History() []llm.Message // 当前会话历史（/sessions 切换后渲染用）
 }
 
@@ -31,6 +32,11 @@ const (
 	chatViewName  = "chat"
 	inputViewName = "input"
 )
+
+// thinkingEfforts 是可选思考强度列表（/thinking 与 Ctrl+T 用）。
+// auto 表示不传 reasoning_effort 参数，由 API 自行决定；其余值原样透传，
+// 是否支持由后端决定（不支持时 API 报错，错误透传给用户展示）。
+var thinkingEfforts = []string{"none", "auto", "low", "medium", "high", "xhigh", "max"}
 
 // TUI 是终端界面。
 type TUI struct {
@@ -52,6 +58,10 @@ type TUI struct {
 	// 最近 20 条，含标题与创建时间）；switchSession 执行会话切换。
 	sessionItems  func() ([]SessionItem, error)
 	switchSession func(id string) error
+
+	// thinking 是当前思考强度显示值（默认 auto；与 agent 侧实际传参
+	// 对应：auto 归一化为不传）。
+	thinking string
 
 	// 列表弹窗状态（/switch 与 /sessions 共用，仅主循环线程读写）。
 	pickerLabels []string
@@ -89,6 +99,7 @@ func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() e
 	return &TUI{
 		cfg: cfg, agent: a, model: model, cwd: cwd,
 		newSession: newSession,
+		thinking:   "auto",
 		uiTasks:    make(chan func(), 128),
 		ctx:        ctx, cancel: cancel,
 	}
@@ -213,6 +224,14 @@ func (t *TUI) setup(g *gocui.Gui) {
 	g.SetKeybinding(inputViewName, gocui.KeyEnter, gocui.ModNone, t.submit)
 	// Ctrl+L 打开会话列表（/sessions 等效；绑在 input view，弹窗打开时不触发）
 	g.SetKeybinding(inputViewName, gocui.KeyCtrlL, gocui.ModNone, t.openSessionsKey)
+	// Ctrl+N 新建会话（/new 等效）
+	g.SetKeybinding(inputViewName, gocui.KeyCtrlN, gocui.ModNone, t.newChatKey)
+	// Ctrl+T 弹出思考强度选择（/thinking 等效）
+	g.SetKeybinding(inputViewName, gocui.KeyCtrlT, gocui.ModNone, t.thinkingKey)
+	// Shift+Tab 弹出模型切换（/switch 等效）；ModNone/ModShift 双绑定，
+	// 兜底部分终端对 Shift+Tab 带显式 Shift 修饰（CSI 1;2Z）的情况
+	g.SetKeybinding(inputViewName, gocui.KeyBacktab, gocui.ModNone, t.switchModelKey)
+	g.SetKeybinding(inputViewName, gocui.KeyBacktab, gocui.ModShift, t.switchModelKey)
 	// Tab 切换 plan/build 模式（view 级优先于 DefaultEditor 的 tab 插入）
 	g.SetKeybinding(inputViewName, gocui.KeyTab, gocui.ModNone, t.toggleMode)
 	g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, t.toggleMode)
@@ -390,6 +409,8 @@ func (t *TUI) handleCommand(cmd string) error {
 		t.switchMode(agent.ModeBuild)
 	case "/switch":
 		return t.handleSwitch(args)
+	case "/thinking":
+		return t.handleThinking(args)
 	case "/sessions":
 		return t.handleSessions()
 	case "/init":
@@ -437,6 +458,53 @@ func (t *TUI) openModelPicker() error {
 	return t.openPicker(" Select model ", labels, t.models, initial, func(g *gocui.Gui, name string) error {
 		return t.switchToModel(name)
 	})
+}
+
+// handleThinking 处理 /thinking：带参数直接设置；无参数弹出选择列表。
+// 与 /switch 一致：agent 忙碌时拒绝。
+func (t *TUI) handleThinking(args string) error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	if t.agent == nil {
+		t.chat.appendSystem(colorize("Error: /thinking is unavailable", ansiRed))
+		return nil
+	}
+	if args == "" {
+		return t.openThinkingPicker()
+	}
+	return t.setThinking(args)
+}
+
+// openThinkingPicker 弹出思考强度选择列表（/thinking 无参数时调用），
+// 默认定位到当前值。
+func (t *TUI) openThinkingPicker() error {
+	labels := make([]string, len(thinkingEfforts))
+	initial := 0
+	for i, e := range thinkingEfforts {
+		labels[i] = "  " + e
+		if e == t.thinking {
+			initial = i
+		}
+	}
+	return t.openPicker(" Select thinking effort ", labels, thinkingEfforts, initial, func(g *gocui.Gui, name string) error {
+		return t.setThinking(name)
+	})
+}
+
+// setThinking 校验思考强度并应用（弹窗确认与 /thinking <name> 共用）。
+// auto 归一化为不传参（agent 侧处理），其余值原样透传。
+func (t *TUI) setThinking(name string) error {
+	if !slices.Contains(thinkingEfforts, name) {
+		t.chat.appendSystem(colorize("Unknown thinking effort: "+name+" (available: "+strings.Join(thinkingEfforts, ", ")+")", ansiRed))
+		return nil
+	}
+	t.agent.SetThinking(name)
+	t.thinking = name
+	t.status.setThinking(name)
+	t.chat.appendSystem("Thinking effort: " + name)
+	return nil
 }
 
 // handleSessions 处理 /sessions（Ctrl+L 共用）：弹出最近会话列表，
@@ -491,6 +559,23 @@ func (t *TUI) switchToSession(id string) error {
 // openSessionsKey 是 Ctrl+L 键位：与 /sessions 命令等效。
 func (t *TUI) openSessionsKey(g *gocui.Gui, v *gocui.View) error {
 	return t.handleSessions()
+}
+
+// newChatKey 是 Ctrl+N 键位：与 /new 命令等效（复用 busy 拒绝等逻辑）。
+func (t *TUI) newChatKey(g *gocui.Gui, v *gocui.View) error {
+	return t.newChat()
+}
+
+// switchModelKey 是 Shift+Tab 键位：与 /switch（无参数）等效。
+// 走 handleSwitch 以复用 busy 检查与注入检查。
+func (t *TUI) switchModelKey(g *gocui.Gui, v *gocui.View) error {
+	return t.handleSwitch("")
+}
+
+// thinkingKey 是 Ctrl+T 键位：与 /thinking（无参数）等效。
+// 走 handleThinking 以复用 busy 检查与注入检查。
+func (t *TUI) thinkingKey(g *gocui.Gui, v *gocui.View) error {
+	return t.handleThinking("")
 }
 
 // padDisplay 按终端显示宽度（displayWidth）把 s 右侧补空格到宽度 w；
@@ -670,10 +755,11 @@ func (t *TUI) Stop() {
 
 const helpText = `Available commands:
   /init     Analyze the project and generate/refresh AGENTS.md
-  /new      Start a new session (mode resets to plan)
+  /new      Start a new session (Ctrl+N; mode resets to plan)
   /plan     Switch to plan mode (read-only: inspect and search only)
   /build    Switch to build mode (writable: modify files, run commands)
-  /switch   Switch model (pick from the list, or /switch <model>)
+  /switch   Switch model (Shift+Tab, pick from the list, or /switch <model>)
+  /thinking Switch thinking effort (Ctrl+T, pick from the list, or /thinking <effort>; auto = let the API decide)
   /sessions Switch to a recent session (Ctrl+L)
   /exit     Quit zlite
   /help     Show this help

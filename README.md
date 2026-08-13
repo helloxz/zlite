@@ -50,6 +50,15 @@ bin/zlite --version
 
 详见 [docs/plans/README.md](./docs/plans/README.md)（架构、详细设计、实施计划）与 [docs/config.md](./docs/config.md)（配置文件说明）。
 
+## 指令和快捷键
+
+* `/init`：初始化项目
+* `/new`：新建对话，快捷键`Ctrl + N`
+* 切换模式：快捷键`Tab`
+* `/switch`：切换模型：快捷键`Shift + Tab`
+* `/sessions`：切换对话，快捷键`Ctrl + L`
+* `/thinking`：思考强度切换，快捷键`Ctrl + T`
+
 ## 许可
 
 AGPL-3.0（见 [LICENSE](./LICENSE)）

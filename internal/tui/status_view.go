@@ -15,12 +15,14 @@ type statusView struct {
 	view  *gocui.View // 输入框 view（Title 显示在其顶边框）
 	mode  agent.Mode
 	model string
-	usage llm.Usage
+	usage llm.Usage // 保留（DoneEvent 更新），但不再在状态栏展示
 	busy  bool
+	// thinking 是当前思考强度显示值（默认 auto）。
+	thinking string
 }
 
 func newStatusView(v *gocui.View, model string) *statusView {
-	s := &statusView{view: v, mode: agent.ModePlan, model: model}
+	s := &statusView{view: v, mode: agent.ModePlan, model: model, thinking: "auto"}
 	v.TitleColor = gocui.ColorCyan
 	return s
 }
@@ -45,14 +47,20 @@ func (s *statusView) setModel(m string) {
 	s.render()
 }
 
+func (s *statusView) setThinking(t string) {
+	s.thinking = t
+	s.render()
+}
+
 // title 生成状态栏文本（纯文本，不嵌 ANSI——边框绘制不解析转义）。
+// 注意：不再展示 token 用量（usage 字段保留，仅隐藏）。
 func (s *statusView) title() string {
 	busy := ""
 	if s.busy {
 		busy = " *busy*"
 	}
-	return fmt.Sprintf(" [%s] %s%s | up %d down %d | /help for commands ",
-		string(s.mode), s.model, busy, s.usage.InputTokens, s.usage.OutputTokens)
+	return fmt.Sprintf(" [%s] %s%s | thinking: %s | /help for commands ",
+		string(s.mode), s.model, busy, s.thinking)
 }
 
 // render 更新 Title 并强制重绘（Write(nil) 置 tainted，空写不改变内容）。
