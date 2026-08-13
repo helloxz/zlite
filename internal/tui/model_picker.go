@@ -55,6 +55,11 @@ func (t *TUI) openModelPicker() error {
 	}
 	v.Visible = true
 
+	// 弹窗期间隐藏终端光标：g.Cursor 全局开启时 gocui 会把光标画在
+	// 选中行开头（覆盖前导空格，看起来第一行错位）；行高亮由
+	// Highlight + Sel 配色渲染，不依赖光标位置。
+	g.Cursor = false
+
 	// 重新绑定按键（先清理残留；keybindings 仅主循环线程访问）
 	g.DeleteKeybindings(modelPickerViewName)
 	g.SetKeybinding(modelPickerViewName, gocui.KeyArrowDown, gocui.ModNone, t.pickerMoveDown)
@@ -85,13 +90,14 @@ func (t *TUI) renderModelPicker(v *gocui.View) {
 	_ = v.SetCursor(0, t.pickerSel)
 }
 
-// closeModelPicker 关闭弹窗：隐藏 view、清 keybinding、恢复输入焦点。
+// closeModelPicker 关闭弹窗：隐藏 view、清 keybinding、恢复输入焦点与光标。
 // view 保留（Visible=false），下次打开只改坐标，不增删 g.views。
 func (t *TUI) closeModelPicker(g *gocui.Gui) {
 	g.DeleteKeybindings(modelPickerViewName)
 	if v, err := g.View(modelPickerViewName); err == nil {
 		v.Visible = false
 	}
+	g.Cursor = true // 恢复输入框光标（openModelPicker 中已隐藏）
 	_, _ = g.SetCurrentView(inputViewName)
 }
 
