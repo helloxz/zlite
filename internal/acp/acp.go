@@ -112,6 +112,7 @@ func (a *Agent) Initialize(ctx context.Context, params acpsdk.InitializeRequest)
 				List:   &acpsdk.SessionListCapabilities{},
 				Close:  &acpsdk.SessionCloseCapabilities{},
 				Resume: &acpsdk.SessionResumeCapabilities{},
+				Delete: &acpsdk.SessionDeleteCapabilities{},
 			},
 		},
 		AuthMethods: []acpsdk.AuthMethod{},
@@ -237,6 +238,14 @@ func (a *Agent) CloseSession(ctx context.Context, params acpsdk.CloseSessionRequ
 	if st == nil {
 		return acpsdk.CloseSessionResponse{}, nil // 幂等
 	}
+	a.closeState(st)
+	return acpsdk.CloseSessionResponse{}, nil
+}
+
+// closeState 关闭会话的运行时状态：取消进行中的 turn、停止事件翻译、
+// 关闭 jsonl 文件句柄。调用前须已 takeSession（从管理 map 移除），
+// 供 CloseSession 与 UnstableDeleteSession 共用。
+func (a *Agent) closeState(st *sessionState) {
 	st.markClosed()
 	// 等待进行中的 turn 结束（轮询而非忙等锁，避免与 turn 清理互相阻塞）
 	deadline := time.Now().Add(closeWaitTimeout)
@@ -251,7 +260,35 @@ func (a *Agent) CloseSession(ctx context.Context, params acpsdk.CloseSessionRequ
 	if !st.isBusy() {
 		_ = st.zs.Close()
 	}
-	return acpsdk.CloseSessionResponse{}, nil
+}
+
+// UnstableDeleteSession 删除会话（experimental session/delete）：
+// 关闭运行时状态后异步删除磁盘文件（jsonl + meta 缓存 + 原子写残留）。
+// 尽力而为语义：文件删除失败静默（尤其 Windows 上文件句柄占用），
+// handler 立即返回成功，不阻塞 client；session 不存在时幂等成功。
+// 注意：会话未在本进程打开过时，delete 请求无 cwd 字段，只能按进程 cwd
+// 拼路径尝试删除（ACP 与 client 通常同 cwd，命中率高），删不到则静默。
+func (a *Agent) UnstableDeleteSession(ctx context.Context, params acpsdk.UnstableDeleteSessionRequest) (acpsdk.UnstableDeleteSessionResponse, error) {
+	var path string
+	st := a.takeSession(params.SessionId)
+	if st != nil {
+		// 会话在本进程内：先关闭运行时（取消 turn、等结束、关文件句柄），
+		// 否则 Windows 上句柄占用会导致删除失败。
+		a.closeState(st)
+		path = st.zs.Path
+	} else {
+		path = a.opts.Mgr.SessionPath(a.opts.Cwd, string(params.SessionId))
+		if _, err := os.Stat(path); err != nil {
+			return acpsdk.UnstableDeleteSessionResponse{}, nil // 幂等：不存在视为成功
+		}
+	}
+	// 异步删除磁盘文件（jsonl + meta 缓存 + 原子写残留），失败静默。
+	go func() {
+		os.Remove(path)
+		os.Remove(path + ".meta")
+		os.Remove(path + ".meta.tmp")
+	}()
+	return acpsdk.UnstableDeleteSessionResponse{}, nil
 }
 
 // Cancel 取消指定会话的进行中 turn（session/cancel 通知）。

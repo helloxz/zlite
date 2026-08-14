@@ -114,11 +114,17 @@ func (m *Manager) Continue(cwd string) (*Session, error) {
 // Open 按会话 ID 打开 cwd 下的会话（/sessions 切换用）。
 // 会话不存在时返回 ErrNoSession。
 func (m *Manager) Open(cwd, id string) (*Session, error) {
-	path := filepath.Join(m.dirFor(cwd), id+".jsonl")
+	path := m.SessionPath(cwd, id)
 	if _, err := os.Stat(path); err != nil {
 		return nil, ErrNoSession
 	}
 	return m.open(path)
+}
+
+// SessionPath 返回 cwd 下指定 id 会话的 jsonl 路径（不访问磁盘，可能不存在）。
+// 供调用方按 ID 定位会话文件（如删除时拼路径），与 Open 的定位口径一致。
+func (m *Manager) SessionPath(cwd, id string) string {
+	return filepath.Join(m.dirFor(cwd), id+".jsonl")
 }
 
 // PruneEmpty 删除最近 limit 条会话中没有任何对话记录（message）的空会话
