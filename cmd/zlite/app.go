@@ -286,9 +286,13 @@ func runWithSetup(cfgPath string, opts options) error {
 		if err != nil {
 			return err
 		}
-		// 3. 热重载进现有 TUI（不重启进程）
-		t.SetAgent(rt.ag)
-		t.SetModel(rt.modelName)
+		// 3. 热重载进现有 TUI（不重启进程）。
+		// 注意：onSetupDone 在 tea 消息循环（Update）内同步执行，
+		// 这里只能用 InLoop 版 setter——SetAgent/SetModel 内部
+		// Program.Send 是同步投递，从消息循环内调用会自死锁
+		// （实测首次引导最后一步回车后 UI 卡死、Ctrl+C 无效）。
+		t.SetAgentInLoop(rt.ag)
+		t.SetModelInLoop(rt.modelName)
 		t.SetSwitchModel(rt.cfg.AllModels(), rt.switchModel)
 		t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
 		t.SetSkillsLister(rt.skillItems)

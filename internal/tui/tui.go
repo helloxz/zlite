@@ -132,7 +132,22 @@ func (t *TUI) EnableSetup(onSetupDone func(config.SetupInput) error) {
 	t.onSetupDone = onSetupDone
 }
 
-// SetAgent 替换 agent（引导完成热重载后调用）。
+// SetAgentInLoop 在消息循环（Update）内设置 agent——引导回调（EnableSetup
+// 的 onSetupDone）在 Update 线程内同步执行，只能用它而不是 SetAgent：
+// Program.Send 是同步投递（阻塞到消息被处理），从消息循环内调用会自死锁
+// （实测首次引导最后一步回车后 UI 完全卡死、Ctrl+C 无效）。
+// 订阅重连由引导完成路径返回 waitAgentEvent cmd（见 handleSetup）。
+func (t *TUI) SetAgentInLoop(a agentFace) {
+	t.agent = a
+}
+
+// SetModelInLoop 在消息循环内更新模型名（引导回调用）：不投递 refreshMsg
+// （同 SetAgentInLoop 的死锁原因）；重绘由引导完成路径统一触发。
+func (t *TUI) SetModelInLoop(name string) {
+	t.setModel(name)
+}
+
+// SetAgent 替换 agent（外部线程调用；消息循环内请用 SetAgentInLoop）。
 func (t *TUI) SetAgent(a agentFace) {
 	t.agent = a
 	// 事件流订阅可能已退出（agent 重建）：重新发起订阅并触发重绘
@@ -639,7 +654,9 @@ func (t *TUI) startSetup() {
 // handleSetup 按当前步骤处理用户输入（submit 拦截）。
 // api_key 必填（用户决策），其余非法输入提示重输；全部完成调用
 // onSetupDone 落盘并热重载，失败则引导从头再来。
-func (t *TUI) handleSetup(msg string) error {
+// 返回 (cmd, error)：引导完成且 agent 已注入时返回 waitAgentEvent cmd
+// （agent 由 onSetupDone 经 SetAgentInLoop 注入，此前从未订阅过）。
+func (t *TUI) handleSetup(msg string) (tea.Cmd, error) {
 	switch t.setupState {
 	case setupType:
 		switch msg {
@@ -649,14 +666,14 @@ func (t *TUI) handleSetup(msg string) error {
 			t.setupInput.Type = config.TypeOpenAIResponses
 		default:
 			t.chat.appendSystem("Invalid choice. Enter 1 (openai.chat) or 2 (openai.responses):")
-			return nil
+			return nil, nil
 		}
 		t.setupState = setupBaseURL
 		t.chat.appendSystem("Base URL (e.g. https://api.example.com/v1):")
 	case setupBaseURL:
 		if msg == "" {
 			t.chat.appendSystem("Base URL cannot be empty. Enter the endpoint base URL:")
-			return nil
+			return nil, nil
 		}
 		t.setupInput.BaseURL = msg
 		t.setupState = setupAPIKey
@@ -664,7 +681,7 @@ func (t *TUI) handleSetup(msg string) error {
 	case setupAPIKey:
 		if msg == "" {
 			t.chat.appendSystem("API key cannot be empty. Enter your API key:")
-			return nil
+			return nil, nil
 		}
 		t.setupInput.APIKey = msg
 		t.setupState = setupModels
@@ -673,7 +690,7 @@ func (t *TUI) handleSetup(msg string) error {
 		models := config.SplitModels(msg)
 		if len(models) == 0 {
 			t.chat.appendSystem("At least one model is required. Enter model(s), comma separated:")
-			return nil
+			return nil, nil
 		}
 		t.setupInput.Models = models
 		t.setupState = setupNone
@@ -685,11 +702,16 @@ func (t *TUI) handleSetup(msg string) error {
 			t.chat.appendSystem("Let's try again. Type: enter 1 for openai.chat, 2 for openai.responses:")
 			t.setupState = setupType
 			t.setupInput = config.SetupInput{}
-			return nil
+			return nil, nil
 		}
 		t.chat.appendSystem(colorize("Configuration saved. Happy coding!", ansiGreen))
+		// 引导完成：agent 刚经 SetAgentInLoop 注入，启动事件订阅
+		if t.agent != nil {
+			return waitAgentEvent(t.agent.Events(), t.ctx.Done()), nil
+		}
+		return nil, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // handleApproval 处理确认输入（y 批准 / n 拒绝）。

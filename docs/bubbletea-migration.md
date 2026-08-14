@@ -3,6 +3,26 @@
 > 状态：**M0-M4 全部完成，迁移交付**。后续 UI 优化记录见 §0.9-§0.10。
 > 目标版本：bubbletea v1.3.10 + lipgloss v1.1.0 + bubbles **v1.0.0**（textarea/viewport）。
 
+## 0.16 修复首次引导卡死（2026-08-15，严重 bug）
+
+1. **现象**：无配置首次进入引导，最后一步（模型列表）回车后 UI 完全
+   卡死，任何输入与 Ctrl+C 无效（多终端复现）。
+2. **根因**：`runWithSetup` 的 onSetupDone 回调在 tea 消息循环（Update）
+   线程内同步执行；其中 `t.SetAgent`/`t.SetModel` 内部调用
+   `Program.Send`——bubbletea 的 Send 是**同步投递**（阻塞到消息被处理），
+   从消息循环内调用即自死锁（Ctrl+C 也是消息，同样进不了 Update）。
+   首次引导路径此前从未被冒烟覆盖（此前测试均带 API key 环境变量，
+   直接跳过引导），M1 时 `setModel` 注释已记录过同一陷阱（/switch 卡死）。
+3. **修复**：
+   - 新增 `SetAgentInLoop`/`SetModelInLoop`（不投递消息，消息循环内安全）；
+   - `handleSetup` 改返回 `(cmd, error)`：引导完成且 agent 注入后返回
+     `waitAgentEvent` cmd，启动事件订阅（agent 此前从未订阅过）；
+   - app.go 回调改用 InLoop setter（其余 Setter 本就是纯赋值）。
+4. **测试**：新增 `TestSetupInLoopNoDeadlock`（模拟 app.go 回调全量行为：
+   引导完成、agent/模型注入、订阅 cmd 返回、后续消息与事件渲染正常）；
+   tmux 端到端实测：清空 fakehome 配置启动 → 引导 4 步 → saved 提示、
+   状态栏模型热重载为 gpt-4o、再发消息正常、Ctrl+C 退出。
+
 ## 0.15 会话弹窗加宽 + 时间列对齐（2026-08-15）
 
 1. **时间前置**（用户建议采纳）：会话行

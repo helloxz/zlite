@@ -302,9 +302,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	// 首次配置引导：拦截输入走引导状态机
 	if t.setupState != setupNone {
-		t.handleSetup(msg)
+		cmd, _ := t.handleSetup(msg)
 		m.refreshChat()
-		return m, nil
+		return m, cmd
 	}
 	if strings.HasPrefix(msg, "/") {
 		if err := t.handleCommand(msg); err != nil {
