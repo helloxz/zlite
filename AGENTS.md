@@ -5,8 +5,9 @@
 ## Project
 
 - **技术栈**：Go 1.25+、gocui（TUI）、goai（LLM 流式）、viper（配置）
+- **平台**：Linux / macOS / Windows。Windows 上 `run_command` 优先使用 Git Bash / MSYS2 提供的 `sh`（POSIX 命令原样可用），找不到则回退 `cmd.exe /C`（工具描述会提示模型改用 Windows 命令）；内置工具（read/grep/glob/write/edit/delete/web_fetch）均为纯 Go 实现，跨平台。
 - **入口**：`cmd/zlite/main.go` → `cmd/zlite/app.go`（组装 config → llm → tools → session → agent → tui）
-- **产物**：`make build` 生成 `bin/zlite`
+- **产物**：`make build` 生成 `bin/zlite`（Windows 用 `GOOS=windows go build ./cmd/zlite`）
 
 ## Commands
 

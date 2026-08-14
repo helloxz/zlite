@@ -1,6 +1,6 @@
 # zlite
 
-轻量级 CLI Coding Agent：体积小、内存占用低，面向 Linux / macOS，用于写代码场景。
+轻量级 CLI Coding Agent：体积小、内存占用低，面向 Linux / macOS / Windows，用于写代码场景。
 
 > ⚠️ 开发中（阶段一进行中）。当前仅完成项目脚手架。
 

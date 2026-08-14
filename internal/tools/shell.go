@@ -3,10 +3,13 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zendev-sh/goai"
@@ -49,8 +52,9 @@ type runCommandInput struct {
 // ---- plan 模式：只读白名单版 ----
 
 func runCommandPlanTool(cwd string) Tool {
+	desc := "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/ps/pgrep/free/uptime/lsof/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。" + shellHint()
 	return Tool{
-		GoAITool: goai.NewTool("run_command", "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/ps/pgrep/free/uptime/lsof/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。",
+		GoAITool: goai.NewTool("run_command", desc,
 			func(ctx context.Context, in runCommandInput) (string, error) {
 				if in.Command == "" {
 					return "", fmt.Errorf("command 不能为空")
@@ -67,8 +71,9 @@ func runCommandPlanTool(cwd string) Tool {
 // ---- build 模式：全量执行 + 危险命令确认 ----
 
 func runCommandBuildTool(cwd string, confirm []string) Tool {
+	desc := "执行任意 shell 命令（工作目录为项目根）。危险命令（如 rm/mv/dd/mkfs/sudo/chmod、git 写操作等）会请求用户确认。" + shellHint()
 	return Tool{
-		GoAITool: goai.NewTool("run_command", "执行任意 shell 命令（工作目录为项目根）。危险命令（如 rm/mv/dd/mkfs/sudo/chmod、git 写操作等）会请求用户确认。",
+		GoAITool: goai.NewTool("run_command", desc,
 			func(ctx context.Context, in runCommandInput) (string, error) {
 				if in.Command == "" {
 					return "", fmt.Errorf("command 不能为空")
@@ -98,12 +103,18 @@ func normalizeCommandTimeout(timeoutS int) int {
 }
 
 // executeShell 执行命令并返回输出（超时控制）。
+// 非 Windows 平台用 sh -c；Windows 上优先探测 Git Bash/MSYS2 的 sh（POSIX 命令原样可用），
+// 找不到则回退 cmd.exe /C（此时工具描述已提示模型改用 Windows 命令语法）。
 func executeShell(ctx context.Context, cwd, command string, timeoutS int) (string, error) {
 	timeout := normalizeCommandTimeout(timeoutS)
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
+	prefix := shellPrefix()
+	args := make([]string, 0, len(prefix)+1)
+	args = append(args, prefix[1:]...) // "-c"（或 cmd 的 "/C"）
+	args = append(args, command)
+	cmd := exec.CommandContext(cmdCtx, prefix[0], args...)
 	cmd.Dir = cwd
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -113,6 +124,71 @@ func executeShell(ctx context.Context, cwd, command string, timeoutS int) (strin
 		return "", fmt.Errorf("command failed: %v\noutput:\n%s", err, truncate(string(out)))
 	}
 	return string(out), nil
+}
+
+// windowsShellCandidates 是常见 Git Bash / MSYS2 的 sh 安装路径（探测顺序）。
+var windowsShellCandidates = []string{
+	`C:\Program Files\Git\bin\sh.exe`,
+	`C:\Program Files\Git\usr\bin\sh.exe`,
+	`C:\Program Files (x86)\Git\bin\sh.exe`,
+	`C:\msys64\usr\bin\sh.exe`,
+	`C:\tools\msys64\usr\bin\sh.exe`,
+}
+
+// detectShell 探测可用的 shell 解释器，返回 argv 前缀（如 {"sh","-c"} 或 {"cmd.exe","/C"}）。
+// 非 Windows 平台固定使用 sh；Windows 上依次尝试 PATH 中的 sh 与常见 Git Bash/MSYS2
+// 安装路径，全部失败则回退 cmd.exe /C（POSIX 命令不可用，由 shellHint 提示模型）。
+// lookPath/fileExists 参数可注入，便于单测覆盖 Windows 分支。
+func detectShell(goos string, lookPath func(string) (string, error), fileExists func(string) bool) []string {
+	if goos != "windows" {
+		return []string{"sh", "-c"}
+	}
+	if p, err := lookPath("sh"); err == nil {
+		return []string{p, "-c"}
+	}
+	for _, p := range windowsShellCandidates {
+		if fileExists(p) {
+			return []string{p, "-c"}
+		}
+	}
+	return []string{"cmd.exe", "/C"}
+}
+
+var (
+	shellOnce sync.Once
+	shellArgv []string
+)
+
+// shellPrefix 返回当前平台的 shell 前缀（首次调用时探测并缓存，避免每次命令执行重复探测）。
+func shellPrefix() []string {
+	shellOnce.Do(func() {
+		shellArgv = detectShell(runtime.GOOS, exec.LookPath, func(p string) bool {
+			_, err := os.Stat(p)
+			return err == nil
+		})
+	})
+	return shellArgv
+}
+
+// shellHint 返回注入 run_command 工具描述的 shell 类型提示。
+// sh 可用时返回空（模型默认 POSIX 语法即可）；回退 cmd.exe 时提示改用 Windows 命令。
+func shellHint() string {
+	return shellHintFor(shellPrefix())
+}
+
+// shellHintFor 根据 shell argv 前缀生成提示文案（独立成函数便于测试）。
+func shellHintFor(prefix []string) string {
+	base := strings.ToLower(shellBaseName(prefix[0]))
+	if base == "sh" || base == "sh.exe" {
+		return ""
+	}
+	return " 当前 shell 为 Windows cmd.exe（未检测到 sh）。POSIX 命令（ls/cat/grep/find 等）不可用，请改用 Windows 命令（dir/type/findstr 等）。"
+}
+
+// shellBaseName 兼容两种路径分隔符地取文件名（Windows 路径 `C:\...\sh.exe` 在
+// 非 Windows 平台上用 filepath.Base 会取不到文件名，这里统一转 `/` 再取）。
+func shellBaseName(name string) string {
+	return path.Base(strings.ReplaceAll(name, `\`, "/"))
 }
 
 // validateReadOnlyCommand 校验命令符合 plan 模式只读约束。
