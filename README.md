@@ -1,10 +1,92 @@
 # zlite
 
-轻量级 CLI Coding Agent：体积小、内存占用低，面向 Linux / macOS / Windows，用于写代码场景。
+轻量级 CLI Coding Agent：体积小、内存占用低，面向 Linux / macOS / Windows，用于日常对话、服务器运维等场景。
 
-> ⚠️ 开发中（阶段一进行中）。当前仅完成项目脚手架。
 
-## 构建
+## 快速安装
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helloxz/zlite/main/install.sh | bash
+```
+
+安装到 `~/.zlite/bin/`，并在 `~/.local/bin/` 创建 symlink。支持指定版本和自定义目录：
+
+```bash
+# 安装指定版本
+bash install.sh -v 0.1.0
+
+# 自定义安装目录（通常需要 sudo）
+bash install.sh --dir /usr/local/bin
+
+# 使用镜像下载
+bash install.sh --base-url https://ghproxy.net/https://github.com
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/helloxz/zlite/main/install.ps1 | iex
+```
+
+安装到 `$HOME\.zlite\bin\`，并自动添加到用户 PATH。支持指定版本：
+
+```powershell
+# 安装指定版本（通过环境变量传参）
+$env:ZLITE_VERSION = '0.1.0'; irm https://raw.githubusercontent.com/helloxz/zlite/main/install.ps1 | iex
+
+# 或下载后执行
+powershell -ExecutionPolicy Bypass -File install.ps1 -Version 0.1.0
+```
+
+
+## 一键更新
+
+### Linux / macOS
+
+```bash
+bash update.sh
+```
+
+更新到最新版本，支持 `--force` 强制重装和 `-v` 指定版本：
+
+```bash
+bash update.sh --force          # 强制重装当前版本
+bash update.sh -v 0.2.0         # 更新到指定版本
+sudo bash update.sh             # 当安装在 /usr/local/bin 时
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/helloxz/zlite/main/update.ps1 | iex
+```
+
+支持 `-Force` 和 `-Version` 参数：
+
+```powershell
+# 强制更新
+$env:ZLITE_FORCE = '1'; irm https://raw.githubusercontent.com/helloxz/zlite/main/update.ps1 | iex
+
+# 或下载后执行
+powershell -ExecutionPolicy Bypass -File update.ps1 -Version 0.2.0 -Force
+```
+
+
+## 安装布局
+
+安装采用版本化布局，支持回滚到上一版本：
+
+```
+~/.zlite/bin/
+├── zlite              # 命令入口（symlink / copy，指向当前版本）
+├── zlite-0.1.0        # 版本化二进制
+└── zlite-0.2.0        # 更新后保留上一版本用于回滚
+```
+
+
+## 从源码构建
 
 要求 Go ≥ 1.25（本地已验证 1.25.7）。
 
@@ -15,36 +97,6 @@ make vet          # go vet
 bin/zlite --version
 ```
 
-## 配置（规划）
-
-首次运行会创建 `~/.zlite/config.toml`，示例：
-
-```toml
-[[providers]]                    # 可配置多个渠道，模型以 provider_name/model_name 引用
-  name = "default"               # 渠道名（唯一、不含 /）
-  type = "openai.chat"            # 厂商.协议: openai.chat | openai.responses | anthropic
-  base_url = "https://api.example.com/v1"
-  api_key = "${ZLITE_DEFAULT_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
-  models = ["gpt-4o"]
-
-[agent]
-  mode = "plan"                  # plan（只读）| build（可写）
-  default_model = "default/gpt-4o"  # 默认模型（provider_name/model_name）；缺省取第一个渠道第一个模型
-  auto_approve = false           # 信任模式（跳过写操作确认）
-  max_steps = 16                 # 单轮工具循环上限
-
-[shell]
-  confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
-  plan_extra_commands = []       # plan 模式额外放行命令（与内置只读白名单合并去重）
-```
-
-## 功能规划
-
-**一期（已完成）**：TUI 连续对话、流式输出、会话 jsonl 存储与 `-c` 恢复、plan/build 模式切换（Tab / `/plan` `/build`）、只读工具（read_file/grep/glob/web_fetch/run_command 只读白名单）、**build 写能力**（write_file/edit_file/delete 直接执行；run_command 全量 + 危险命令 TUI 确认）、**`/new` 新建会话**（模式重置 plan）、**`/init` 项目初始化**（AI 扫描项目生成/更新 AGENTS.md；plan 模式输出内容，build 模式写文件）、**AGENTS.md 自动加载**（每次对话读取项目根 AGENTS.md 注入系统提示词，`load_agents_md` 开关）、ASCII 边框（CJK locale 兼容）。
-
-**二期（进行中）**：skills（SKILL.md 两级加载）、ACP 协议（`zlite acp`）、多渠道多模型（`/model`）、会话管理增强（列表选择、上下文截断细化）。
-
-详见 [docs/plans/README.md](./docs/plans/README.md)（架构、详细设计、实施计划）与 [docs/config.md](./docs/config.md)（配置文件说明）。
 
 ## 指令和快捷键
 

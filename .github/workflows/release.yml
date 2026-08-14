@@ -1,0 +1,79 @@
+name: release
+
+# zlite release workflow: build 6 platform binaries (Linux/macOS/Windows x amd64/arm64) →
+# assemble release packages (Linux = .tar.gz, macOS/Windows = .zip) →
+# upload to GitHub Release assets.
+#
+# Trigger (one of two):
+#   1) release: published — create a Release on GitHub / gh CLI, auto-build and upload assets (recommended)
+#   2) workflow_dispatch — manual run with a tag of an existing Release (fallback)
+#
+# Version convention: tag must be v<version>, and must match internal/version/version.go exactly.
+#
+# UPX: not used (disabled by design).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'GitHub Release tag (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write # upload Release assets
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "error: cannot determine release tag (no release event or workflow_dispatch input)" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches version.go
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          case "$TAG" in
+            v*) VERSION="${TAG#v}" ;;
+            *) echo "error: tag must start with v (e.g. v0.1.0), got ${TAG}" >&2; exit 1 ;;
+          esac
+          GO_VERSION="$(grep -oP 'Version = "\K[^"]+' internal/version/version.go)"
+          if [ "$VERSION" != "$GO_VERSION" ]; then
+            echo "error: tag version ${VERSION} does not match version.go version ${GO_VERSION}" >&2
+            exit 1
+          fi
+          echo "Version check passed: v${VERSION}"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build all platforms
+        run: ./scripts/pack.sh --all
+
+      - name: Upload release assets
+        # --clobber: allow overwrite when the workflow is re-run
+        run: gh release upload "${{ steps.tag.outputs.tag }}" bin/zlite-v*.zip bin/zlite-v*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
