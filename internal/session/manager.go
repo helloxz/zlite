@@ -25,7 +25,7 @@ type Info struct {
 	Provider  string
 	Mode      string
 	Title     string
-	CreatedAt time.Time
+	CreatedAt time.Time // 最后活跃时间（取自 meta.UpdatedAt；List 排序键，兼容旧 ModTime 语义）
 	Messages  int
 }
 
@@ -69,6 +69,7 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 	s := &Session{
 		ID: id, Path: path, file: f,
 		Mode: mode, Model: p.Models[0], Provider: p.Name,
+		CreatedAt: now.Format(time.RFC3339), metaPath: metaPathFor(path),
 	}
 	if s.Provider == "" {
 		s.Provider = "default"
@@ -89,6 +90,8 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 		f.Close()
 		return nil, fmt.Errorf("写入会话元信息失败: %w", err)
 	}
+	// 写初始 meta 缓存（列表用；缓存语义，失败静默，打开时会重建）。
+	s.syncMeta(now.Format(time.RFC3339Nano))
 	return s, nil
 }
 
@@ -141,12 +144,21 @@ func (m *Manager) PruneEmpty(cwd string, limit int, skipID string) (int, error) 
 		if err := os.Remove(in.Path); err != nil {
 			return removed, err
 		}
+		// 联动删除 meta 缓存（含可能残留的 tmp），不留孤儿文件；容忍不存在。
+		os.Remove(metaPathFor(in.Path))
+		os.Remove(metaPathFor(in.Path) + ".tmp")
 		removed++
 	}
 	return removed, nil
 }
 
-// List 列出 cwd 下的会话（按修改时间倒序）。
+// List 列出 cwd 下的会话（按最后活跃时间倒序）。
+//
+// 只读 meta 缓存（<id>.jsonl.meta），不再全量扫描 jsonl——这是会话规模
+// 增长时的关键性能点：列表成本从 O(总字节数) 降为 O(会话数 × 单 meta 小读)。
+// 无 meta / meta 损坏的会话视为不存在（不兼容旧版数据；被打开后经 open
+// 重建 meta 会重新出现）。CreatedAt 承载最后活跃时间（meta.UpdatedAt），
+// 与旧实现用 jsonl ModTime 排序的语义一致。
 func (m *Manager) List(cwd string) ([]Info, error) {
 	dir := m.dirFor(cwd)
 	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
@@ -156,36 +168,16 @@ func (m *Manager) List(cwd string) ([]Info, error) {
 
 	var infos []Info
 	for _, p := range matches {
-		recs, err := readAll(p)
-		if err != nil || len(recs) == 0 {
+		meta, err := readMeta(metaPathFor(p))
+		if err != nil || meta.ID == "" {
 			continue
 		}
-		head := recs[0]
-		if head.Type != TypeSession {
-			continue
-		}
-		st, _ := os.Stat(p)
-		ts, _ := time.Parse(time.RFC3339, head.CreatedAt)
-		messages := 0
-		title := ""
-		for _, r := range recs[1:] {
-			switch r.Type {
-			case TypeMessage:
-				messages++
-			case TypeMeta:
-				if r.Event == metaTitleEvent {
-					title = r.Value
-				}
-			}
-		}
+		updated, _ := time.Parse(time.RFC3339, meta.UpdatedAt)
 		infos = append(infos, Info{
-			ID: head.ID, Path: p,
-			Model: head.Model, Provider: head.Provider, Mode: head.Mode,
-			Title: title, CreatedAt: ts, Messages: messages,
+			ID: meta.ID, Path: p,
+			Model: meta.Model, Provider: meta.Provider, Mode: meta.Mode,
+			Title: meta.Title, CreatedAt: updated, Messages: meta.Messages,
 		})
-		if st != nil {
-			infos[len(infos)-1].CreatedAt = st.ModTime()
-		}
 	}
 
 	sort.Slice(infos, func(i, j int) bool { return infos[i].CreatedAt.After(infos[j].CreatedAt) })
@@ -214,9 +206,13 @@ func (m *Manager) open(path string) (*Session, error) {
 	var hist []Record
 	title := ""
 	titleSet := false
+	msgCount := 0
 	for _, r := range recs[1:] {
 		switch r.Type {
-		case TypeMessage, TypeToolCall, TypeToolResult:
+		case TypeMessage:
+			hist = append(hist, r)
+			msgCount++
+		case TypeToolCall, TypeToolResult:
 			hist = append(hist, r)
 		case TypeMeta:
 			if r.Event == metaTitleEvent {
@@ -238,6 +234,14 @@ func (m *Manager) open(path string) (*Session, error) {
 		ID: head.ID, Path: path, file: f,
 		Mode: head.Mode, Model: head.Model, Provider: head.Provider,
 		Title: title, History: hist, titleSet: titleSet,
+		CreatedAt: head.CreatedAt, metaPath: metaPathFor(path),
+		metaMessages: msgCount,
+	}
+	// 全量重建 meta 缓存（一致性收敛点：修复崩溃产生的落后/损坏；
+	// updated_at 取 jsonl 文件修改时间，与 Continue 的排序口径一致）。
+	// 缓存语义：失败静默，不阻塞打开。
+	if st, err := os.Stat(path); err == nil {
+		s.syncMeta(st.ModTime().Format(time.RFC3339Nano))
 	}
 	return s, nil
 }

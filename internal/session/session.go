@@ -18,12 +18,13 @@ const maxTitleRunes = 30
 
 // Session 表示一个打开的会话（对应 ~/.zlite/sessions/<cwd-hash>/<id>.jsonl）。
 type Session struct {
-	ID       string
-	Path     string
-	Mode     string
-	Model    string
-	Provider string
-	Title    string // 会话标题（首条用户消息截取，持久化在 meta 记录中）
+	ID        string
+	Path      string
+	Mode      string
+	Model     string
+	Provider  string
+	Title     string // 会话标题（首条用户消息截取，持久化在 meta 记录中）
+	CreatedAt string // 会话创建时间（RFC3339，取自 jsonl 首行；meta 缓存用）
 
 	file    *os.File
 	History []Record // 恢复后内存中的记录（不含 session 首行）
@@ -31,9 +32,14 @@ type Session struct {
 	// titleSet 标记标题已确定（区别于 Title=="" 的未设置状态）：
 	// 首条消息为纯空白时标题为空串，但仍视为已确定，避免重复写 meta。
 	titleSet bool
+
+	// meta 派生缓存（列表用，见 meta.go）：metaPath 是 <path>.jsonl.meta；
+	// metaMessages 是内存中的 TypeMessage 计数，Append 时同步刷新并落盘。
+	metaPath     string
+	metaMessages int
 }
 
-// Append 追加一行记录：写文件（立即落盘）并同步到 History。
+// Append 追加一行记录：写文件（立即落盘）并同步到 History 与 meta 缓存。
 func (s *Session) Append(r Record) error {
 	if r.Ts == "" {
 		r.Ts = time.Now().Format(time.RFC3339)
@@ -49,7 +55,33 @@ func (s *Session) Append(r Record) error {
 	case TypeMessage, TypeToolCall, TypeToolResult:
 		s.History = append(s.History, r)
 	}
+	if r.Type == TypeMessage {
+		s.metaMessages++
+	}
+	// 刷新 meta 缓存（列表用）。meta 是派生缓存，写失败静默不阻塞主路径，
+	// 一致性由 open 打开会话时全量重建收敛。
+	s.syncMeta(time.Now().Format(time.RFC3339Nano))
 	return nil
+}
+
+// syncMeta 将当前内存状态写入 meta 缓存文件（<Path>.jsonl.meta）。
+// 缓存语义：失败静默；updatedAt 为排序用的最后活跃时间（RFC3339Nano）。
+func (s *Session) syncMeta(updatedAt string) {
+	if s.metaPath == "" {
+		return
+	}
+	m := &Meta{
+		Version:   metaVersion,
+		ID:        s.ID,
+		Title:     s.Title,
+		Model:     s.Model,
+		Provider:  s.Provider,
+		Mode:      s.Mode,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: updatedAt,
+		Messages:  s.metaMessages,
+	}
+	_ = writeMeta(s.metaPath, m)
 }
 
 // AppendUser 记录用户消息。
