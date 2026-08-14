@@ -3,19 +3,22 @@ package tools
 import (
 	"context"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
-	"regexp"
+	"net/url"
 	"strings"
 	"time"
 
+	htmlx "github.com/cybergodev/html"
 	"github.com/zendev-sh/goai"
 )
 
 const (
-	webFetchTimeout = 30 * time.Second
+	webFetchTimeout = 60 * time.Second
 	webFetchMaxBody = 1024 * 1024 // 1MB
+
+	// chromeUA 使用真实 Chrome UA，避免被目标站点识别为爬虫而拒绝访问
+	chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 type webFetchInput struct {
@@ -34,11 +37,18 @@ func webFetchTool() Tool {
 					return "", fmt.Errorf("仅支持 http/https URL: %q", in.URL)
 				}
 
+				u, err := url.Parse(in.URL)
+				if err != nil {
+					return "", err
+				}
+
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, in.URL, nil)
 				if err != nil {
 					return "", err
 				}
-				req.Header.Set("User-Agent", "zlite/0.1 (+https://github.com/helloxz/zlite)")
+				req.Header.Set("User-Agent", chromeUA)
+				// 伪装 Referer 为目标站点首页（scheme://host，去掉路径），使请求看起来像站内跳转
+				req.Header.Set("Referer", u.Scheme+"://"+u.Host)
 
 				resp, err := client.Do(req)
 				if err != nil {
@@ -62,7 +72,12 @@ func webFetchTool() Tool {
 				ct := resp.Header.Get("Content-Type")
 				text := string(body)
 				if strings.Contains(ct, "html") {
-					text = htmlToText(body)
+					// 使用 cybergodev/html 库清洗 HTML 并转换为 Markdown，方便 AI 处理
+					md, err := htmlx.ExtractToMarkdownWithContext(ctx, body, htmlx.MarkdownConfig())
+					if err != nil {
+						return "", fmt.Errorf("HTML 清洗失败: %w", err)
+					}
+					text = md
 				}
 				if truncated {
 					text += "\n...[响应超过 1MB 已截断]"
@@ -73,24 +88,4 @@ func webFetchTool() Tool {
 	}
 }
 
-var (
-	scriptRe      = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	styleRe       = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	commentRe     = regexp.MustCompile(`(?s)<!--.*?-->`)
-	tagRe         = regexp.MustCompile(`(?s)<[^>]+>`)
-	inlineSpaceRe = regexp.MustCompile(`[ \t\r]+`)
-	blankLineRe   = regexp.MustCompile(`\n{3,}`)
-)
 
-// htmlToText 去除 HTML 标签与脚本，返回可读纯文本（不引入第三方库）。
-func htmlToText(b []byte) string {
-	s := string(b)
-	s = scriptRe.ReplaceAllString(s, " ")
-	s = styleRe.ReplaceAllString(s, " ")
-	s = commentRe.ReplaceAllString(s, " ")
-	s = tagRe.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
-	s = inlineSpaceRe.ReplaceAllString(s, " ")
-	s = blankLineRe.ReplaceAllString(s, "\n\n")
-	return strings.TrimSpace(s)
-}
