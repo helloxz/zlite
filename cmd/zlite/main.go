@@ -10,11 +10,11 @@ import (
 )
 
 func main() {
-	mode := flag.String("m", "", "初始模式: plan | build（覆盖配置文件 agent.mode）")
-	cont := flag.Bool("c", false, "继续当前目录最近的会话")
-	list := flag.Bool("l", false, "列出当前目录的会话")
-	acpMode := flag.Bool("acp", false, "以 ACP 协议模式运行（stdio，供编辑器等客户端接入）")
-	showVersion := flag.Bool("version", false, "打印版本并退出")
+	mode := flag.String("m", "", "initial mode: plan | build (overrides agent.mode in config)")
+	cont := flag.Bool("c", false, "continue the most recent session in the current directory")
+	list := flag.Bool("l", false, "list sessions in the current directory")
+	acpMode := flag.Bool("acp", false, "run in ACP protocol mode (stdio, for editors and other clients)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {

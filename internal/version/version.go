@@ -2,8 +2,9 @@
 package version
 
 var (
-	// Version 由 Makefile 通过 -ldflags "-X" 注入，默认 dev。
-	Version = "dev"
+	// Version 是 zlite 的语义化版本号，发版时手动更新（见 docs/dev.md）。
+	// 不被 ldflags 注入，任何构建方式（make build / go build）均生效。
+	Version = "0.1.0"
 	// Commit 是构建时的 git commit。
 	Commit = "none"
 	// BuildTime 是构建时间（UTC RFC3339）。
