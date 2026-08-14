@@ -12,6 +12,10 @@ import (
 //
 // 写文件工具（write_file/edit_file/delete）按用户决策直接执行，不经过确认；
 // 仅 run_command 的危险命令（黑名单/危险模式）需要确认。
+//
+// 实现：program.Send 把请求投递进消息循环（线程安全），聊天区展示提示并
+// 置 pendingApproval；用户输入 y/n 由 submit 的 handleApproval 消费，
+// 决策经 channel 回传给阻塞中的 Request。
 type Approver struct {
 	t *TUI
 }
@@ -26,26 +30,18 @@ func (a *Approver) Request(ctx context.Context, req agent.ApprovalRequest) (agen
 	if a.t == nil {
 		return agent.Denied, errors.New("TUI not attached")
 	}
+	if a.t.program == nil {
+		return agent.Denied, errors.New("TUI not running")
+	}
 
 	ch := make(chan agent.ApprovalDecision, 1)
-	shown := make(chan struct{})
-	a.t.ui(func() {
-		a.t.chat.appendSystem(colorize("Approve? "+req.Summary+"  [y/n] ", ansiYellow))
-		a.t.approvalCh = ch
-		close(shown)
-	})
-
-	select {
-	case <-shown:
-	case <-ctx.Done():
-		return agent.Denied, ctx.Err()
-	}
+	a.t.program.Send(approvalRequestMsg{summary: req.Summary, ch: ch})
 
 	select {
 	case d := <-ch:
 		return d, nil
 	case <-ctx.Done():
-		a.t.ui(func() { a.t.approvalCh = nil })
+		a.t.program.Send(approvalCancelMsg{ch: ch})
 		return agent.Denied, ctx.Err()
 	}
 }

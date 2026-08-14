@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/awesome-gocui/gocui"
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/llm"
 )
@@ -22,22 +21,19 @@ type entry struct {
 	thinking string
 }
 
-// chatView 是消息历史视图。
+// chatView 是消息历史的纯状态模型：只维护 entries 与滚动跟随状态，
+// 渲染统一由 model.refreshChat() 经 renderString(w) 生成字符串并写入 viewport。
+// （bubbletea 消息循环天然串行，原 gocui 版的 uiTasks 队列已删除。）
 type chatView struct {
-	view    *gocui.View
 	entries []entry
 	md      mdRenderer
 	// autoScroll=true 时跟随底部（新消息自动贴底显示）；
 	// 用户上翻看历史后置 false，滚回底部时自动恢复。
 	autoScroll bool
-	// lastW 是上次 render 时的内容区宽度；layout 在宽度变化时重绘头带补空格。
-	lastW int
 }
 
-func newChatView(v *gocui.View) *chatView {
-	v.Autoscroll = true
-	v.Wrap = true
-	return &chatView{view: v, autoScroll: true}
+func newChatView() *chatView {
+	return &chatView{autoScroll: true}
 }
 
 // appendUser 追加用户消息（每轮对话前插入一条空行分隔，标明回合边界）。
@@ -47,7 +43,6 @@ func (c *chatView) appendUser(text string) {
 	c.scrollToBottom()
 	c.entries = append(c.entries, entry{kind: "divider"})
 	c.entries = append(c.entries, entry{kind: "user", text: text})
-	c.render()
 }
 
 // appendAssistantDelta 追加助手流式增量（自动归并到当前助手消息）。
@@ -58,7 +53,6 @@ func (c *chatView) appendAssistantDelta(delta string) {
 		c.entries = append(c.entries, entry{kind: "assistant"})
 	}
 	c.entries[len(c.entries)-1].text += delta
-	c.render()
 }
 
 // startProcessing 标记当前助手消息进入生成中状态（用户提交后同步调用，
@@ -68,7 +62,6 @@ func (c *chatView) startProcessing() {
 		return
 	}
 	c.entries = append(c.entries, entry{kind: "assistant", thinking: "processing"})
-	c.render()
 }
 
 // confirmThinking 把生成中状态切换为思考中（ThinkingStartEvent：
@@ -76,7 +69,6 @@ func (c *chatView) startProcessing() {
 func (c *chatView) confirmThinking() {
 	if n := len(c.entries); n > 0 && c.entries[n-1].kind == "assistant" && c.entries[n-1].thinking == "processing" {
 		c.entries[n-1].thinking = "thinking"
-		c.render()
 	}
 }
 
@@ -89,14 +81,12 @@ func (c *chatView) finishProcessing() {
 			break
 		}
 	}
-	c.render()
 }
 
 // appendToolCall 追加工具调用行（待完成状态）。
 func (c *chatView) appendToolCall(e agent.ToolCallEvent) {
 	summary := compactInput(e.Input)
 	c.entries = append(c.entries, entry{kind: "tool", text: "  [tool] " + e.Name + summary + " ..."})
-	c.render()
 }
 
 // finishToolCall 更新最后一条工具行状态（[ok] / [fail]）。
@@ -111,20 +101,17 @@ func (c *chatView) finishToolCall(e agent.ToolResultEvent) {
 			break
 		}
 	}
-	c.render()
 }
 
 // appendSystem 追加系统提示（斜杠命令反馈等）。
 func (c *chatView) appendSystem(text string) {
 	c.entries = append(c.entries, entry{kind: "system", text: text})
-	c.render()
 }
 
 // reset 清空聊天区（/new 新会话用）。
 func (c *chatView) reset() {
 	c.entries = nil
 	c.autoScroll = true // 新会话回到跟随底部
-	c.render()
 }
 
 // loadHistory 用模型消息历史整段重建聊天区（/sessions 切换会话后调用）。
@@ -147,27 +134,22 @@ func (c *chatView) loadHistory(msgs []llm.Message) {
 			// 工具结果已由 assistant 的工具行代表，不再单独展示
 		}
 	}
-	c.render()
 }
 
-// render 重绘整个聊天区。
-// 手动滚动（autoScroll=false）时保留当前 Origin：Clear() 会重置原点，
-// 重写后恢复，避免新消息渲染把用户拉回顶部。
-func (c *chatView) render() {
-	_, oy := c.view.Origin() // 记录手动滚动位置（Clear 前）
-	c.view.Autoscroll = c.autoScroll
-	c.view.Clear()
-	w, _ := c.view.Size()
-	c.lastW = w
+// renderString 生成聊天区完整渲染字符串（头带按 w 补空格）。
+// 手动滚动（autoScroll=false）时由调用方保留当前滚动位置：
+// viewport.SetContent 会 clamp 越界偏移，无需像 gocui 版手动恢复 Origin。
+func (c *chatView) renderString(w int) string {
+	var b strings.Builder
 	for _, e := range c.entries {
 		switch e.kind {
 		case "divider":
 			// 回合分隔：空行。角色头带已经能分出你/助手，不再画整宽虚线。
-			fmt.Fprintln(c.view)
+			b.WriteString("\n")
 		case "user":
-			fmt.Fprintln(c.view, paintLine(" You: "+e.text, ansiBarUser, w))
+			b.WriteString(paintLine(" You: "+e.text, ansiBarUser, w))
 			// 用户消息与 AI 答复之间留一个空行，视觉上分隔输入与输出
-			fmt.Fprintln(c.view)
+			b.WriteString("\n\n")
 		case "assistant":
 			head := " Zlite: "
 			mark, markFg := "", ""
@@ -182,90 +164,34 @@ func (c *chatView) render() {
 				// 生成结束：统一 [done]，输出内容在下方
 				mark, markFg = "[done]", ansiFgDone
 			}
-			fmt.Fprintln(c.view, paintBar(head, mark, markFg, ansiBarZlite, w))
+			b.WriteString(paintBar(head, mark, markFg, ansiBarZlite, w))
+			b.WriteString("\n")
 			if e.text != "" {
-				fmt.Fprintln(c.view, c.md.Render(e.text))
+				b.WriteString(c.md.Render(e.text))
+				b.WriteString("\n")
 			}
 		case "tool":
 			rest := strings.TrimPrefix(e.text, "  [tool]")
-			fmt.Fprintln(c.view, paintLine(" [tool]", ansiBarTool, 0)+colorize(rest, ansiYellow))
+			b.WriteString(paintLine(" [tool]", ansiBarTool, 0) + colorize(rest, ansiYellow))
+			b.WriteString("\n")
 		case "system":
 			// 系统提示降为 dim，和用户青色头带区分；已预着色的 Error/Approved 仍走内层 SGR。
-			fmt.Fprintln(c.view, colorize(e.text, ansiDim))
+			b.WriteString(colorize(e.text, ansiDim))
+			b.WriteString("\n")
 		}
 	}
-	if !c.autoScroll {
-		c.view.SetOrigin(0, c.clampOy(oy))
-	}
-}
-
-// relayout 宽度变化时重绘（头带按新宽度补空格）。高度变化只改可视区，不必重写。
-func (c *chatView) relayout() {
-	if c == nil || c.view == nil {
-		return
-	}
-	w, _ := c.view.Size()
-	if w == c.lastW {
-		return
-	}
-	c.render()
-}
-
-// clampOy 把滚动位置限制在有效范围 [0, 总行数-可视高度]（与 gocui 的
-// Autoscroll 底部算法一致），内容减少时防止越界滚出空白。
-func (c *chatView) clampOy(oy int) int {
-	_, maxY := c.view.Size()
-	if maxY <= 0 {
-		return 0
-	}
-	maxOy := c.view.ViewLinesHeight() - maxY - 1
-	if maxOy < 0 {
-		maxOy = 0
-	}
-	if oy < 0 {
-		oy = 0
-	}
-	if oy > maxOy {
-		oy = maxOy
-	}
-	return oy
-}
-
-// scrollBy 按 dy 行滚动聊天区（负数上翻看历史，正数下翻）。
-// 滚到最底部时恢复自动跟随（autoScroll=true），此后新消息继续贴底。
-func (c *chatView) scrollBy(dy int) {
-	if dy == 0 {
-		return
-	}
-	_, maxY := c.view.Size()
-	if maxY <= 0 {
-		return
-	}
-	_, oy := c.view.Origin()
-	oy = c.clampOy(oy + dy)
-	if maxOy := c.view.ViewLinesHeight() - maxY - 1; oy >= maxOy {
-		// 到达（或滚过）底部：恢复自动滚动
-		c.autoScroll = true
-		c.view.Autoscroll = true
-	} else {
-		c.autoScroll = false
-		c.view.Autoscroll = false
-	}
-	c.view.SetOrigin(0, oy)
+	return b.String()
 }
 
 // scrollToTop 直接滚动到顶部（查看最早的消息），并退出自动滚动：
 // 后续新消息渲染不把用户拉走，直到手动滚回底部或发消息。
 func (c *chatView) scrollToTop() {
 	c.autoScroll = false
-	c.view.Autoscroll = false
-	c.view.SetOrigin(0, 0)
 }
 
 // scrollToBottom 恢复自动跟随底部。
 func (c *chatView) scrollToBottom() {
 	c.autoScroll = true
-	c.view.Autoscroll = true
 }
 
 // compactInput 把工具参数压缩为单行摘要（截断过长）。

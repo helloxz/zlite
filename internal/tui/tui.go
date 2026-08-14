@@ -1,7 +1,13 @@
-// Package tui 实现 zlite 的终端界面（gocui）。
+// Package tui 实现 zlite 的终端界面（bubbletea）。
 //
 // TUI 只消费 agent 的事件流并触发 agent.Run，不包含任何业务逻辑；
 // 二期 ACP 接入时通过同一事件契约复用 agent 核心。
+//
+// 架构（bubbletea Elm 模型）：
+//   - model（model.go）持有 *TUI 引用，Update 消息循环串行处理事件；
+//   - chatView/statusView 只维护状态并生成渲染字符串，不直接画屏；
+//   - agent 事件流经订阅 Cmd（waitAgentEvent）注入消息循环；
+//   - 外部注入 API（SetAgent/SetModel/...）只改 TUI 字段，下次渲染自然生效。
 package tui
 
 import (
@@ -11,7 +17,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/awesome-gocui/gocui"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
@@ -28,10 +35,8 @@ type agentFace interface {
 	History() []llm.Message // 当前会话历史（/sessions 切换后渲染用）
 }
 
-const (
-	chatViewName  = "chat"
-	inputViewName = "input"
-)
+// errQuit 是内部退出信号（/exit 命令用；Ctrl+C 直接走 tea.Quit）。
+var errQuit = errors.New("quit")
 
 // thinkingEfforts 是可选思考强度列表（/thinking 与 Ctrl+T 用）。
 // auto 表示不传 reasoning_effort 参数，由 API 自行决定；其余值原样透传，
@@ -68,12 +73,6 @@ type TUI struct {
 	// 对应：auto 归一化为不传）。
 	thinking string
 
-	// 列表弹窗状态（/switch 与 /sessions 共用，仅主循环线程读写）。
-	pickerLabels []string
-	pickerValues []string
-	pickerOnPick func(g *gocui.Gui, value string) error
-	pickerSel    int
-
 	// setupNeeded 为 true 时进入首次配置引导（type → base_url → api_key → models），
 	// 完成后调用 onSetupDone 落盘并热重载（app.go 注入）。
 	setupNeeded bool
@@ -81,31 +80,35 @@ type TUI struct {
 	setupState  setupState
 	setupInput  config.SetupInput
 
-	g      *gocui.Gui
 	chat   *chatView
 	status *statusView
 
-	// uiTasks 串行化所有 UI 更新：g.Update 内部会新开 goroutine 投递，
-	// 并发调用时执行顺序不保证（曾出现流式增量颠倒）；
-	// 统一经 FIFO 队列 + 单分发 goroutine 串行 UpdateAsync。
-	uiTasks chan func()
+	// picker 非 nil 时表示列表选择弹窗打开（模态，仅消息循环线程读写）。
+	picker *picker
+
+	// screenH 是最近一次窗口高度（弹窗布局用；由 model.handleResize 同步）。
+	screenH int
 
 	// approvalCh 非 nil 时表示有正在等待用户确认的危险操作
-	// （仅主循环线程读写：Approver 经 ui 队列设置，submit 消费）。
+	// （仅消息循环线程读写：Approver 经 program.Send 设置，submit 消费）。
 	approvalCh chan agent.ApprovalDecision
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx     context.Context
+	cancel  context.CancelFunc
+	program *tea.Program // Run 启动后非 nil；Stop 与 Approver 经它投递
 }
 
 // New 创建 TUI。newSession 为 /new 命令的会话切换回调（可为 nil）。
 func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() error) *TUI {
 	ctx, cancel := context.WithCancel(context.Background())
+	chat := newChatView()
+	chat.appendSystem("zlite ready - " + cwd)
 	return &TUI{
 		cfg: cfg, agent: a, model: model, cwd: cwd,
 		newSession: newSession,
 		thinking:   "auto",
-		uiTasks:    make(chan func(), 128),
+		chat:       chat,
+		status:     newStatusView(model),
 		ctx:        ctx, cancel: cancel,
 	}
 }
@@ -131,10 +134,25 @@ func (t *TUI) EnableSetup(onSetupDone func(config.SetupInput) error) {
 // SetAgent 替换 agent（引导完成热重载后调用）。
 func (t *TUI) SetAgent(a agentFace) {
 	t.agent = a
+	// 事件流订阅可能已退出（agent 重建）：重新发起订阅并触发重绘
+	if t.program != nil {
+		t.program.Send(agentResubscribeMsg{})
+	}
 }
 
-// SetModel 更新状态栏模型名（引导完成热重载后调用）。
+// SetModel 更新状态栏模型名（引导完成热重载后调用，外部线程）。
 func (t *TUI) SetModel(name string) {
+	t.setModel(name)
+	if t.program != nil {
+		t.program.Send(refreshMsg{})
+	}
+}
+
+// setModel 是消息循环内的模型名更新：只改共享状态，不发 refreshMsg。
+// 注意：bubbletea 的 Program.Send 是同步投递（阻塞到消息被处理），
+// 从消息循环内调用会自死锁（实测：/switch 确认时卡死）；渲染由
+// 调用方在 Update 末尾统一 refreshChat 完成。
+func (t *TUI) setModel(name string) {
 	t.model = name
 	if t.status != nil {
 		t.status.setModel(name)
@@ -182,258 +200,35 @@ func (t *TUI) SetSkillsLister(fn func() []SkillItem) {
 	t.skillsLister = fn
 }
 
-// ui 把 UI 更新任务加入串行队列（FIFO，顺序保证）。
-func (t *TUI) ui(f func()) {
-	t.uiTasks <- f
-}
-
-// dispatch 从队列取出任务并投递到 gocui 主循环（单 goroutine，串行）。
-func (t *TUI) dispatch() {
-	for f := range t.uiTasks {
-		t.g.UpdateAsync(func(*gocui.Gui) error { f(); return nil })
-	}
-}
-
 // Run 启动 TUI（阻塞直到退出）。
 func (t *TUI) Run() error {
-	// Output256：头带用 236/237 深灰；8 色 SGR 仍走 outputNormal 回退。
-	g, err := gocui.NewGui(gocui.Output256, true)
-	if err != nil {
-		return fmt.Errorf("初始化终端界面失败: %w", err)
-	}
-	return t.run(g)
-}
-
-// run 在指定 Gui 上运行主循环（测试可传入 OutputSimulator 的 Gui）。
-func (t *TUI) run(g *gocui.Gui) error {
-	t.g = g
-	// 刻意不启用 g.Mouse（保持 false）：请求鼠标事件（mouse tracking）会
-	// 让终端模拟器放弃原生文本选择，拖拽选字/复制失效。滚动一律走键盘
-	// （PgUp/PgDn 翻页、Home/End 到顶/到底），与 opencode 等工具同策略。
-	defer g.Close()
-
-	t.setup(g)
-	go t.dispatch()
-	if t.agent != nil {
-		go t.consumeEvents()
-	}
-	// 首次配置引导：等 MainLoop 首个循环创建好视图后启动（UpdateAsync 投递）
-	if t.setupNeeded {
-		g.UpdateAsync(func(*gocui.Gui) error { t.startSetup(); return nil })
-	}
-
-	if err := g.MainLoop(); err != nil && !errors.Is(err, gocui.ErrQuit) {
-		return err
-	}
+	// AltScreen：进入切换 alternate screen buffer，退出自动恢复（与 gocui 一致）。
+	// 刻意不启用鼠标（tea.WithMouseCellMotion 不开）：请求鼠标事件会让终端
+	// 模拟器放弃原生文本选择；滚动一律走键盘，与 opencode 等工具同策略。
+	p := tea.NewProgram(newModel(t), tea.WithAltScreen())
+	t.program = p
+	_, err := p.Run()
+	t.program = nil
 	t.cancel() // 终止未完成的 agent 运行
-	return nil
+	return err
 }
 
-// setup 布局与键位绑定。
-func (t *TUI) setup(g *gocui.Gui) {
-	// 边框用 ASCII 字符（- | +）：框线字符（│ ─ ┌ 等）的 East Asian Width
-	// 为 Ambiguous，在 CJK locale 下 tcell 按宽 2 渲染，会覆盖内容第一列
-	// （实测现象：每行开头吞掉 1 个字符）。ASCII 边框宽度固定 1，不受 locale 影响。
-	g.ASCII = true
-	// 显示并定位光标到输入框：gocui 默认隐藏光标，中文输入法（IME）的 preedit
-	// 预览会显示在终端默认光标位置（屏幕右下）并触发重绘闪烁。
-	g.Cursor = true
-
-	g.SetManagerFunc(t.layout)
-
-	// 全局：Ctrl+C 退出
-	g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, t.quit)
-	// 输入区：Enter 提交
-	g.SetKeybinding(inputViewName, gocui.KeyEnter, gocui.ModNone, t.submit)
-	// Ctrl+L 打开会话列表（/sessions 等效；绑在 input view，弹窗打开时不触发）
-	g.SetKeybinding(inputViewName, gocui.KeyCtrlL, gocui.ModNone, t.openSessionsKey)
-	// Ctrl+N 新建会话（/new 等效）
-	g.SetKeybinding(inputViewName, gocui.KeyCtrlN, gocui.ModNone, t.newChatKey)
-	// Ctrl+T 弹出思考强度选择（/thinking 等效）
-	g.SetKeybinding(inputViewName, gocui.KeyCtrlT, gocui.ModNone, t.thinkingKey)
-	// Shift+Tab 弹出模型切换（/switch 等效）；ModNone/ModShift 双绑定，
-	// 兜底部分终端对 Shift+Tab 带显式 Shift 修饰（CSI 1;2Z）的情况
-	g.SetKeybinding(inputViewName, gocui.KeyBacktab, gocui.ModNone, t.switchModelKey)
-	g.SetKeybinding(inputViewName, gocui.KeyBacktab, gocui.ModShift, t.switchModelKey)
-	// Tab 切换 plan/build 模式（view 级优先于 DefaultEditor 的 tab 插入）
-	g.SetKeybinding(inputViewName, gocui.KeyTab, gocui.ModNone, t.toggleMode)
-	g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, t.toggleMode)
-	// 聊天区滚动：PgUp/PgDn 翻页、Home/End 直接到顶/到底。
-	// 不请求鼠标事件（见 run 注释），滚动纯键盘。
-	// 全局绑定安全：输入框的 DefaultEditor 不使用这些键（无编辑冲突）；
-	// 弹窗打开时 handler 内忽略（见 chatScroll）。
-	g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone, t.chatScroll(-1))
-	g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone, t.chatScroll(1))
-	g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, t.chatJumpTop)
-	g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, t.chatJumpBottom)
-}
-
-// chatScroll 生成聊天区翻页 handler：dy 为方向（-1 上翻 / +1 下翻），
-// 一页 = 可视高度 - 1 行（避免滚动过头）。列表弹窗打开时忽略滚动。
-func (t *TUI) chatScroll(dy int) func(g *gocui.Gui, v *gocui.View) error {
-	return func(g *gocui.Gui, v *gocui.View) error {
-		if t.chat == nil {
-			return nil
-		}
-		if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
-			return nil // 弹窗内 PgUp/PgDn 不滚动聊天区
-		}
-		_, maxY := t.chat.view.Size()
-		t.chat.scrollBy(dy * (maxY - 1))
-		return nil
+// Stop 请求 TUI 退出（外部信号处理用）。program.Quit 线程安全。
+func (t *TUI) Stop() {
+	if t.program != nil {
+		t.program.Quit()
 	}
 }
 
-// chatJumpTop 直接滚动到聊天区顶部（Home）。列表弹窗打开时忽略。
-func (t *TUI) chatJumpTop(g *gocui.Gui, v *gocui.View) error {
-	if t.chat == nil {
-		return nil
-	}
-	if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
-		return nil
-	}
-	t.chat.scrollToTop()
-	return nil
-}
-
-// chatJumpBottom 直接滚动到聊天区底部并恢复自动跟随（End）。
-// 列表弹窗打开时忽略。
-func (t *TUI) chatJumpBottom(g *gocui.Gui, v *gocui.View) error {
-	if t.chat == nil {
-		return nil
-	}
-	if cv := g.CurrentView(); cv != nil && cv.Name() == pickerViewName {
-		return nil
-	}
-	t.chat.scrollToBottom()
-	return nil
-}
-
-// layout 两区布局：消息区（带边框）+ 输入区（3 行高带边框，内容区 1 行；
-// 状态信息（模式/模型/用量）显示在输入框边框的 Title 上）。
-// 说明：gocui 的 setRune 固定 +1 边框偏移，1 行无边框视图的内容会画到屏幕外，
-// 因此输入框必须带边框且高度 ≥3 才有内容区。
-func (t *TUI) layout(g *gocui.Gui) error {
-	maxX, maxY := g.Size()
-	if maxX <= 0 || maxY <= 0 {
-		return nil
-	}
-
-	// 输入区（底部 3 行，边框，内容区 1 行）
-	if v, err := g.SetView(inputViewName, 0, maxY-3, maxX-1, maxY-1, 0); err != nil {
-		if !errors.Is(err, gocui.ErrUnknownView) {
-			return err
-		}
-		v.Editable = true
-		v.Editor = gocui.DefaultEditor
-		// Wrap=true：光标位置换算走累加字符宽度的分支（linesPosOnScreen 在
-		// Wrap=false 时把字符索引当列坐标，中文宽 2 导致光标落后半个字）。
-		v.Wrap = true
-		t.status = newStatusView(v, t.model)
-		t.status.render()
-		if _, err := g.SetCurrentView(inputViewName); err != nil {
-			return err
-		}
-	}
-
-	// 消息区（占主体，带边框）
-	if v, err := g.SetView(chatViewName, 0, 0, maxX-1, maxY-4, 0); err != nil {
-		if !errors.Is(err, gocui.ErrUnknownView) {
-			return err
-		}
-		t.chat = newChatView(v)
-		t.chat.appendSystem("zlite ready - " + t.cwd)
-	} else if t.chat != nil {
-		t.chat.relayout()
-	}
-
-	// 列表选择弹窗 view 常驻（启动时创建一次，Visible=false 隐藏）：
-	// 运行期只切 Visible/坐标，不增删 g.views——gocui 的 loaderTick 会
-	// 并发遍历 views，增删存在数据竞争（见 picker.go 注释）。
-	if _, err := g.View(pickerViewName); err != nil {
-		v, err := g.SetView(pickerViewName, 0, 0, 1, 1, 0)
-		if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
-			return err
-		}
-		v.Visible = false
-		v.Highlight = true // 光标所在行用 Sel 配色高亮
-		v.SelBgColor = gocui.ColorCyan
-		v.SelFgColor = gocui.ColorBlack
-	}
-
-	return nil
-}
-
-// submit 提交输入：先处理待确认操作，再处理斜杠命令，否则交给 agent。
-func (t *TUI) submit(g *gocui.Gui, v *gocui.View) error {
-	msg := strings.TrimSpace(v.Buffer())
-	v.Clear()
-	v.SetCursor(0, 0)
-	v.SetOrigin(0, 0)
-	if msg == "" {
-		return nil
-	}
-	// 待确认的危险操作：输入 y/n 决策
-	if t.approvalCh != nil {
-		return t.handleApproval(msg)
-	}
-	// 首次配置引导：拦截输入走引导状态机
-	if t.setupState != setupNone {
-		return t.handleSetup(msg)
-	}
-	if strings.HasPrefix(msg, "/") {
-		return t.handleCommand(msg)
-	}
-	if t.status.busy {
-		t.chat.appendSystem("(still processing the previous message, please wait)")
-		return nil
-	}
-	// 同步置位 busy 并显示用户消息（主循环线程）：runAgent 在后台
-	// goroutine 运行，若经异步 ui 队列置位，后续 /switch 的 busy 检查
-	// 存在 TOCTOU 窗口。
-	t.status.setBusy(true)
-	t.chat.appendUser(msg)
-	t.chat.startProcessing() // 同步立即显示 [processing...]（生成结束由 runAgent 置 done）
-	go t.runAgent(msg)
-	return nil
-}
-
-// handleApproval 处理确认输入（y 批准 / n 拒绝）。
-func (t *TUI) handleApproval(msg string) error {
-	ch := t.approvalCh
-	switch msg {
-	case "y", "Y", "yes", "Yes":
-		t.approvalCh = nil
-		ch <- agent.Approved
-		t.chat.appendSystem(colorize("Approved", ansiGreen))
-	case "n", "N", "no", "No":
-		t.approvalCh = nil
-		ch <- agent.Denied
-		t.chat.appendSystem(colorize("Denied", ansiRed))
-	default:
-		t.chat.appendSystem("Please answer y (approve) or n (deny)")
-	}
-	return nil
-}
-
-// runAgent 在后台执行一轮对话（busy 与用户消息已由 submit 同步处理）。
-func (t *TUI) runAgent(msg string) {
-	err := t.agent.Run(t.ctx, msg)
-	t.ui(func() {
-		t.status.setBusy(false)
-		t.chat.finishProcessing() // 整轮生成结束：统一置 [done]
-		if err != nil {
-			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
-		}
-	})
-}
+// ---- 斜杠命令处理（逻辑与 gocui 版一致，仅触发方式改为消息循环） ----
 
 // handleCommand 处理斜杠命令（支持参数："/init <要求>"）。
+// 返回 errQuit 表示退出请求。
 func (t *TUI) handleCommand(cmd string) error {
 	name, args := splitCommand(cmd)
 	switch name {
 	case "/exit", "/quit":
-		return gocui.ErrQuit
+		return errQuit
 	case "/new":
 		return t.newChat()
 	case "/plan":
@@ -458,7 +253,7 @@ func (t *TUI) handleCommand(cmd string) error {
 	return nil
 }
 
-// handleSwitch 处理 /switch：带参数直接切换；无参数弹出模型选择列表。
+// handleSwitch 处理 /switch：带参数直接切换；无参数提示列表（M2 弹窗）。
 // 与 /new 一致：agent 忙碌时拒绝，避免替换 streamer 与生成中的 runOnce 竞争。
 func (t *TUI) handleSwitch(args string) error {
 	if t.status.busy {
@@ -490,12 +285,12 @@ func (t *TUI) openModelPicker() error {
 			initial = i
 		}
 	}
-	return t.openPicker(" Select model ", labels, t.models, initial, func(g *gocui.Gui, name string) error {
+	return t.openPicker(" Select model ", labels, t.models, initial, func(name string) error {
 		return t.switchToModel(name)
 	})
 }
 
-// handleThinking 处理 /thinking：带参数直接设置；无参数弹出选择列表。
+// handleThinking 处理 /thinking：带参数直接设置；无参数提示列表（M2 弹窗）。
 // 与 /switch 一致：agent 忙碌时拒绝。
 func (t *TUI) handleThinking(args string) error {
 	if t.status.busy {
@@ -523,7 +318,7 @@ func (t *TUI) openThinkingPicker() error {
 			initial = i
 		}
 	}
-	return t.openPicker(" Select thinking effort ", labels, thinkingEfforts, initial, func(g *gocui.Gui, name string) error {
+	return t.openPicker(" Select thinking effort ", labels, thinkingEfforts, initial, func(name string) error {
 		return t.setThinking(name)
 	})
 }
@@ -573,7 +368,7 @@ func (t *TUI) handleSessions() error {
 		labels[i] = "  " + padDisplay(title, 18) + " " + it.Time
 		ids[i] = it.ID
 	}
-	return t.openPicker(" Select session ", labels, ids, 0, func(g *gocui.Gui, id string) error {
+	return t.openPicker(" Select session ", labels, ids, 0, func(id string) error {
 		return t.switchToSession(id)
 	})
 }
@@ -612,70 +407,9 @@ func (t *TUI) switchToSession(id string) error {
 	if t.agent != nil {
 		t.chat.loadHistory(t.agent.History())
 	}
-	t.SetModel(model) // 会话记录的模型可能被恢复，状态栏同步
+	t.setModel(model) // 会话记录的模型可能被恢复，状态栏同步（消息循环内，不发消息）
 	t.chat.appendSystem("Switched to session " + id)
 	return nil
-}
-
-// openSessionsKey 是 Ctrl+L 键位：与 /sessions 命令等效。
-func (t *TUI) openSessionsKey(g *gocui.Gui, v *gocui.View) error {
-	return t.handleSessions()
-}
-
-// newChatKey 是 Ctrl+N 键位：与 /new 命令等效（复用 busy 拒绝等逻辑）。
-func (t *TUI) newChatKey(g *gocui.Gui, v *gocui.View) error {
-	return t.newChat()
-}
-
-// switchModelKey 是 Shift+Tab 键位：与 /switch（无参数）等效。
-// 走 handleSwitch 以复用 busy 检查与注入检查。
-func (t *TUI) switchModelKey(g *gocui.Gui, v *gocui.View) error {
-	return t.handleSwitch("")
-}
-
-// thinkingKey 是 Ctrl+T 键位：与 /thinking（无参数）等效。
-// 走 handleThinking 以复用 busy 检查与注入检查。
-func (t *TUI) thinkingKey(g *gocui.Gui, v *gocui.View) error {
-	return t.handleThinking("")
-}
-
-// padDisplay 按终端显示宽度（displayWidth）把 s 右侧补空格到宽度 w；
-// 已超宽时原样返回。用于会话列表标题列对齐。
-func padDisplay(s string, w int) string {
-	width := displayWidth(s)
-	if width >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-width)
-}
-
-// displayWidth 返回字符串的终端显示宽度：CJK 等宽字符计 2，其余计 1。
-func displayWidth(s string) int {
-	width := 0
-	for _, r := range s {
-		if r > 0x2E7F { // CJK 部首区起视为宽字符（含中文、全角标点、假名）
-			width += 2
-		} else {
-			width++
-		}
-	}
-	return width
-}
-
-// truncateDisplay 按显示宽度截断 s（超出部分以省略号结尾）。
-func truncateDisplay(s string, w int) string {
-	width := 0
-	for i, r := range []rune(s) {
-		rw := 1
-		if r > 0x2E7F {
-			rw = 2
-		}
-		if width+rw > w {
-			return string([]rune(s)[:i]) + "…"
-		}
-		width += rw
-	}
-	return s
 }
 
 // switchToModel 校验模型引用并执行切换（弹窗确认与 /switch <name> 共用）。
@@ -688,7 +422,7 @@ func (t *TUI) switchToModel(name string) error {
 		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
 		return nil
 	}
-	t.SetModel(name)
+	t.setModel(name) // 消息循环内，不发 refreshMsg（防 Program.Send 自死锁）
 	t.chat.appendSystem("Switched to model: " + name)
 	return nil
 }
@@ -727,13 +461,17 @@ func (t *TUI) initProject(args string) error {
 // runInit 在后台执行 init 任务（busy 已由 initProject 同步置位）。
 func (t *TUI) runInit(msg string) {
 	err := t.agent.RunInit(t.ctx, msg)
-	t.ui(func() {
-		t.status.setBusy(false)
-		t.chat.finishProcessing()
-		if err != nil {
-			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
-		}
-	})
+	if t.program != nil {
+		t.program.Send(agentDoneMsg{err: err})
+	}
+}
+
+// runAgent 在后台执行一轮对话（busy 与用户消息已由 submit 同步处理）。
+func (t *TUI) runAgent(msg string) {
+	err := t.agent.Run(t.ctx, msg)
+	if t.program != nil {
+		t.program.Send(agentDoneMsg{err: err})
+	}
 }
 
 // newChat 新建会话（/new）：结束当前会话、创建新会话、重置模式为 plan。
@@ -773,50 +511,44 @@ func (t *TUI) switchMode(m agent.Mode) {
 }
 
 // toggleMode 在 plan 与 build 之间切换（Tab 键）。
-func (t *TUI) toggleMode(g *gocui.Gui, v *gocui.View) error {
+func (t *TUI) toggleMode() {
 	if t.agent.Mode() == agent.ModePlan {
 		t.switchMode(agent.ModeBuild)
 	} else {
 		t.switchMode(agent.ModePlan)
 	}
-	return nil
 }
 
-// consumeEvents 消费 agent 事件流并更新界面（goroutine）。
-func (t *TUI) consumeEvents() {
-	for ev := range t.agent.Events() {
-		switch e := ev.(type) {
-		case agent.TextDeltaEvent:
-			t.ui(func() { t.chat.appendAssistantDelta(e.Text) })
-		case agent.TextDoneEvent:
-			// 已通过增量渲染，无需额外处理
-		case agent.ToolCallEvent:
-			t.ui(func() { t.chat.appendToolCall(e) })
-		case agent.ToolResultEvent:
-			t.ui(func() { t.chat.finishToolCall(e) })
-		case agent.ModeChangeEvent:
-			t.ui(func() { t.status.setMode(e.Mode) })
-		case agent.ThinkingStartEvent:
-			// 后端返回思维链：processing → thinking
-			t.ui(func() { t.chat.confirmThinking() })
-		case agent.DoneEvent:
-			t.ui(func() { t.status.setUsage(e.Usage) })
+// padDisplay 按终端显示宽度（displayWidth）把 s 右侧补空格到宽度 w；
+// 已超宽时原样返回。用于会话列表标题列对齐。
+func padDisplay(s string, w int) string {
+	width := displayWidth(s)
+	if width >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-width)
+}
+
+// displayWidth 返回字符串的终端显示宽度：CJK 等宽字符计 2，其余计 1。
+// 使用 x/ansi 的宽度计算（EAW ambiguous 按 1，与主流终端一致）。
+func displayWidth(s string) int {
+	return ansi.StringWidth(s)
+}
+
+// truncateDisplay 按显示宽度截断 s（超出部分以省略号结尾）。
+func truncateDisplay(s string, w int) string {
+	width := 0
+	for i, r := range []rune(s) {
+		rw := 1
+		if r > 0x2E7F { // CJK 部首区起视为宽字符（含中文、全角标点、假名）
+			rw = 2
 		}
+		if width+rw > w {
+			return string([]rune(s)[:i]) + "…"
+		}
+		width += rw
 	}
-}
-
-// quit 退出 TUI。
-func (t *TUI) quit(g *gocui.Gui, v *gocui.View) error {
-	return gocui.ErrQuit
-}
-
-// Stop 请求 TUI 退出（外部信号处理用）。
-// 回调返回 ErrQuit 使 MainLoop 正常退出；TUI 未启动（g 为 nil）时忽略。
-func (t *TUI) Stop() {
-	if t.g == nil {
-		return
-	}
-	t.g.Update(func(*gocui.Gui) error { return gocui.ErrQuit })
+	return s
 }
 
 const helpText = `Available commands:
@@ -836,8 +568,7 @@ Scroll chat history with PgUp/PgDn (page) or Home/End (top/bottom). Mouse select
 
 // ---- 首次配置引导（setup state machine）----
 
-// startSetup 启动引导：输出欢迎语与第一步提问。
-// 仅在 MainLoop 首个循环后调用（chat view 已就绪）。
+// startSetup 启动引导：输出欢迎语与第一步提问（Init 阶段投递的消息触发）。
 func (t *TUI) startSetup() {
 	t.setupState = setupType
 	t.chat.appendSystem("Welcome to zlite! Let's configure your model provider.")
@@ -898,4 +629,21 @@ func (t *TUI) handleSetup(msg string) error {
 		t.chat.appendSystem(colorize("Configuration saved. Happy coding!", ansiGreen))
 	}
 	return nil
+}
+
+// handleApproval 处理确认输入（y 批准 / n 拒绝）。
+func (t *TUI) handleApproval(msg string) {
+	ch := t.approvalCh
+	switch msg {
+	case "y", "Y", "yes", "Yes":
+		t.approvalCh = nil
+		ch <- agent.Approved
+		t.chat.appendSystem(colorize("Approved", ansiGreen))
+	case "n", "N", "no", "No":
+		t.approvalCh = nil
+		ch <- agent.Denied
+		t.chat.appendSystem(colorize("Denied", ansiRed))
+	default:
+		t.chat.appendSystem("Please answer y (approve) or n (deny)")
+	}
 }

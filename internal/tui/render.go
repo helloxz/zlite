@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// ANSI 颜色码（gocui 的 escape.go 解析 SGR 序列）。
-// 头带用 256 色深灰底（Run 走 Output256）；8 色码走 outputNormal 回退。
+// ANSI 颜色码（bubbletea/viewport 直接透传 SGR 序列）。
+// 头带用 256 色深灰底；8 色码作为回退。
 const (
 	ansiReset    = "\x1b[0m"
 	ansiGreen    = "\x1b[32m"                     // 代码块 / [ok]

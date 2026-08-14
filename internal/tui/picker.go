@@ -1,144 +1,185 @@
 package tui
 
 import (
-	"errors"
-	"fmt"
+	"strings"
 
-	"github.com/awesome-gocui/gocui"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// pickerViewName 是列表选择弹窗（/switch 模型、/sessions 会话共用）的视图名。
+// picker 是通用列表选择弹窗（/switch 模型、/thinking 思考强度、/sessions
+// 会话共用）的覆盖层状态。nil 表示未打开（模态）。
 //
-// 弹窗 view 在 layout() 中预创建并常驻，运行期只切换 Visible/坐标，
-// 不增删 g.views：gocui v1.1.0 的 loaderTick goroutine 每 50ms 遍历
-// g.Views()（无锁读 g.views），主循环线程 SetView/DeleteView 写 g.views
-// 会触发数据竞争（race detector 实测）；SetView 对已存在 view 仅更新
-// 坐标字段，不写 slice，可安全用于移动弹窗。
-const pickerViewName = "picker"
+// 渲染方式：View() 把聊天区按弹窗位置切分，中间插入边框盒（按行切分，
+// 不触碰行内 ANSI 序列）。键位处理在 model.handleKey 中优先于聊天快捷键。
+type picker struct {
+	title  string
+	labels []string
+	values []string
+	sel    int
+	// scroll 是弹窗内部滚动偏移（条目超过可视高度时使用；跟随选中行）。
+	scroll int
+	// onPick 在确认时调用（此时弹窗已关闭）；返回错误会显示在聊天区。
+	onPick func(value string) error
+}
 
-// openPicker 弹出通用列表选择弹窗（主循环线程调用）：
-// 居中覆盖层视图，↑/↓ 选择、Enter 确认、Esc 取消。
-// labels 为每行显示文本（含前导空格），values 为 Enter 确认时回调收到的
-// 选择值（模型名 / 会话 ID 等）；initial 为初始选中行；onPick 在确认时
-// 调用（此时弹窗已关闭）。
-func (t *TUI) openPicker(title string, labels, values []string, initial int, onPick func(g *gocui.Gui, value string) error) error {
+// openPicker 打开列表选择弹窗（消息循环线程调用）。
+// labels 为每行显示文本，values 为确认时回调收到的选择值（模型名/会话 ID）；
+// initial 为初始选中行；onPick 在确认时调用（此时弹窗已关闭）。
+func (t *TUI) openPicker(title string, labels, values []string, initial int, onPick func(value string) error) error {
 	if len(labels) == 0 || len(labels) != len(values) {
 		t.chat.appendSystem(colorize("Nothing to pick", ansiRed))
 		return nil
 	}
-	g := t.g
-	maxX, maxY := g.Size()
-
-	// 尺寸：宽度按最长标签的显示宽度（CJK 计 2）+ 留白，高度按条目数
-	width := 0
-	for _, l := range labels {
-		if w := displayWidth(l); w > width {
-			width = w
-		}
-	}
-	width += 4
-	if width < 24 {
-		width = 24
-	}
-	if width > maxX-2 {
-		width = maxX - 2
-	}
-	height := len(labels) + 2 // 边框占 2 行
-	if height > maxY-4 {
-		height = maxY - 4
-	}
-	x0 := (maxX - width) / 2
-	y0 := (maxY - height) / 2
-
-	// 更新位置并显示（view 已存在：仅改坐标字段，不写 g.views）
-	v, err := g.SetView(pickerViewName, x0, y0, x0+width, y0+height, 0)
-	if err != nil && !errors.Is(err, gocui.ErrUnknownView) {
-		return err
-	}
-	v.Visible = true
-	v.Title = title
-
-	// 弹窗期间隐藏终端光标：g.Cursor 全局开启时 gocui 会把光标画在
-	// 选中行开头（覆盖前导空格，看起来第一行错位）；行高亮由
-	// Highlight + Sel 配色渲染，不依赖光标位置。
-	g.Cursor = false
-
-	// 重新绑定按键（先清理残留；keybindings 仅主循环线程访问）
-	g.DeleteKeybindings(pickerViewName)
-	g.SetKeybinding(pickerViewName, gocui.KeyArrowDown, gocui.ModNone, t.pickerMoveDown)
-	g.SetKeybinding(pickerViewName, gocui.KeyArrowUp, gocui.ModNone, t.pickerMoveUp)
-	g.SetKeybinding(pickerViewName, gocui.KeyEnter, gocui.ModNone, t.pickerConfirm)
-	g.SetKeybinding(pickerViewName, gocui.KeyEsc, gocui.ModNone, t.pickerCancel)
-
-	t.pickerLabels = labels
-	t.pickerValues = values
-	t.pickerOnPick = onPick
 	if initial < 0 {
 		initial = 0
 	}
 	if initial >= len(labels) {
 		initial = len(labels) - 1
 	}
-	t.pickerSel = initial
-	t.renderPicker(v)
-
-	if _, err = g.SetCurrentView(pickerViewName); err != nil {
-		g.Cursor = true // 聚焦失败时恢复光标，避免界面残留隐藏状态
-		return err
+	t.picker = &picker{
+		title:  title,
+		labels: labels,
+		values: values,
+		sel:    initial,
+		onPick: onPick,
 	}
 	return nil
 }
 
-// renderPicker 重绘弹窗内容并把光标移到选中行（Highlight 据此高亮）。
-func (t *TUI) renderPicker(v *gocui.View) {
-	v.Clear()
-	for _, l := range t.pickerLabels {
-		fmt.Fprintf(v, "%s\n", l)
-	}
-	_ = v.SetCursor(0, t.pickerSel)
+// pickerOpen 返回弹窗是否打开（模态）。
+func (t *TUI) pickerOpen() bool {
+	return t.picker != nil
 }
 
-// closePicker 关闭弹窗：隐藏 view、清 keybinding、恢复输入焦点与光标。
-// view 保留（Visible=false），下次打开只改坐标，不增删 g.views。
-func (t *TUI) closePicker(g *gocui.Gui) {
-	g.DeleteKeybindings(pickerViewName)
-	if v, err := g.View(pickerViewName); err == nil {
-		v.Visible = false
+// pickerMove 移动选中行（clamp，不循环；与 gocui 版一致）。
+func (t *TUI) pickerMove(dy int) {
+	p := t.picker
+	if p == nil {
+		return
 	}
-	g.Cursor = true // 恢复输入框光标（openPicker 中已隐藏）
-	_, _ = g.SetCurrentView(inputViewName)
-}
-
-// pickerMoveDown 下移选中行。
-func (t *TUI) pickerMoveDown(g *gocui.Gui, v *gocui.View) error {
-	if t.pickerSel < len(t.pickerLabels)-1 {
-		t.pickerSel++
+	if p.sel+dy < 0 {
+		p.sel = 0
+	} else if p.sel+dy >= len(p.labels) {
+		p.sel = len(p.labels) - 1
+	} else {
+		p.sel += dy
 	}
-	t.renderPicker(v)
-	return nil
-}
-
-// pickerMoveUp 上移选中行。
-func (t *TUI) pickerMoveUp(g *gocui.Gui, v *gocui.View) error {
-	if t.pickerSel > 0 {
-		t.pickerSel--
+	// 内部滚动跟随选中行
+	vis := t.pickerVisibleLines()
+	if p.sel < p.scroll {
+		p.scroll = p.sel
 	}
-	t.renderPicker(v)
-	return nil
+	if p.sel >= p.scroll+vis {
+		p.scroll = p.sel - vis + 1
+	}
 }
 
 // pickerConfirm 确认选中项并关闭弹窗（调用 openPicker 注入的 onPick）。
-func (t *TUI) pickerConfirm(g *gocui.Gui, v *gocui.View) error {
-	value := t.pickerValues[t.pickerSel]
-	t.closePicker(g)
-	if t.pickerOnPick != nil {
-		return t.pickerOnPick(g, value)
+func (t *TUI) pickerConfirm() {
+	p := t.picker
+	if p == nil {
+		return
 	}
-	return nil
+	value := p.values[p.sel]
+	t.picker = nil
+	if p.onPick != nil {
+		if err := p.onPick(value); err != nil {
+			t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
+		}
+	}
 }
 
 // pickerCancel 取消选择（Esc）。
-func (t *TUI) pickerCancel(g *gocui.Gui, v *gocui.View) error {
-	t.closePicker(g)
-	return nil
+func (t *TUI) pickerCancel() {
+	t.picker = nil
+}
+
+// pickerVisibleLines 返回弹窗内可同时显示的选项行数（高度受屏幕限制）。
+func (t *TUI) pickerVisibleLines() int {
+	// 高度上限：屏幕高 - 4（避开状态栏与输入区）；盒内：边框 2 + 标题 1
+	return maxInt(1, t.screenH-4-3)
+}
+
+// renderPickerBox 渲染弹窗边框盒（多行字符串，宽度/高度按内容与屏幕计算）。
+// 结构：标题行（dim）+ 分隔 + 选项行（选中行 Cyan 底黑字高亮）。
+func (t *TUI) renderPickerBox(w, h int) string {
+	p := t.picker
+	if p == nil {
+		return ""
+	}
+
+	// 宽度：最长标签显示宽度 + 留白，限制在 [24, w-2]
+	width := 0
+	for _, l := range p.labels {
+		if lw := ansi.StringWidth(l); lw > width {
+			width = lw
+		}
+	}
+	width += 4
+	if width < 24 {
+		width = 24
+	}
+	if width > w-2 {
+		width = w - 2
+	}
+
+	// 高度：标题 1 + 选项 + 边框 2，限制在 [4, h-4]
+	vis := t.pickerVisibleLines()
+	height := vis + 3
+	if height > h-4 {
+		height = h - 4
+	}
+	if height < 4 {
+		height = 4
+	}
+
+	// 选项可视窗口
+	optVis := height - 3
+	if optVis < 1 {
+		optVis = 1
+	}
+	start := minInt(p.scroll, maxInt(0, len(p.labels)-optVis))
+	end := minInt(start+optVis, len(p.labels))
+
+	var b strings.Builder
+	b.WriteString(colorize(" "+p.title+" ", ansiDim))
+	b.WriteString("\n")
+	for i := start; i < end; i++ {
+		label := p.labels[i]
+		if i == p.sel {
+			// 选中行高亮：Cyan 底黑字（对应 gocui 版 SelBgColor/SelFgColor）
+			sel := lipgloss.NewStyle().
+				Background(lipgloss.Color("39")).
+				Foreground(lipgloss.Color("0")).
+				Padding(0, 1)
+			b.WriteString(sel.Render(label))
+		} else {
+			b.WriteString(" " + label)
+		}
+		b.WriteString("\n")
+	}
+
+	// 边框盒（RoundedBorder；CJK locale 对齐已由 M0 断言验证）
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder(), true, true, true, true).
+		Width(width).
+		BorderForeground(lipgloss.Color("240")).
+		Render(strings.TrimSuffix(b.String(), "\n"))
+	return box
+}
+
+// maxInt/minInt 是局部小工具（避免为两个调用引入泛型依赖）。
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

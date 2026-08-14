@@ -3,16 +3,13 @@ package tui
 import (
 	"fmt"
 
-	"github.com/awesome-gocui/gocui"
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/llm"
 )
 
-// statusView 管理底部输入框边框上的 Title 状态栏：
-// 模式 / 模型 / token 用量 / 忙碌状态（gocui 的 setRune 固定 +1 边框偏移，
-// 1 行无边框视图内容会画到屏幕外，因此状态信息放在带边框输入框的 Title 上）。
+// statusView 是底部状态栏的纯状态模型：模式 / 模型 / token 用量 / 忙碌 /
+// 思考强度。渲染由 model.View() 经 title() 生成（边框盒，位置在输入区上方）。
 type statusView struct {
-	view  *gocui.View // 输入框 view（Title 显示在其顶边框）
 	mode  agent.Mode
 	model string
 	usage llm.Usage // 保留（DoneEvent 更新），但不再在状态栏展示
@@ -21,35 +18,28 @@ type statusView struct {
 	thinking string
 }
 
-func newStatusView(v *gocui.View, model string) *statusView {
-	s := &statusView{view: v, mode: agent.ModePlan, model: model, thinking: "auto"}
-	v.TitleColor = gocui.ColorCyan
-	return s
+func newStatusView(model string) *statusView {
+	return &statusView{mode: agent.ModePlan, model: model, thinking: "auto"}
 }
 
 func (s *statusView) setMode(m agent.Mode) {
 	s.mode = m
-	s.render()
 }
 
 func (s *statusView) setUsage(u llm.Usage) {
 	s.usage = u
-	s.render()
 }
 
 func (s *statusView) setBusy(b bool) {
 	s.busy = b
-	s.render()
 }
 
 func (s *statusView) setModel(m string) {
 	s.model = m
-	s.render()
 }
 
 func (s *statusView) setThinking(t string) {
 	s.thinking = t
-	s.render()
 }
 
 // title 生成状态栏文本（纯文本，不嵌 ANSI——边框绘制不解析转义）。
@@ -64,13 +54,4 @@ func (s *statusView) title() string {
 	model := truncateDisplay(s.model, 28)
 	return fmt.Sprintf(" [%s] %s | thinking: %s | /help for commands%s ",
 		string(s.mode), model, s.thinking, busy)
-}
-
-// render 更新 Title 并强制重绘（Write(nil) 置 tainted，空写不改变内容）。
-func (s *statusView) render() {
-	if s.view == nil {
-		return
-	}
-	s.view.Title = s.title()
-	s.view.Write(nil)
 }
