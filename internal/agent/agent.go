@@ -150,6 +150,68 @@ func (a *Agent) RunInit(ctx context.Context, userMsg string) error {
 	return a.runOnce(ctx, initSystemPrompt(a.cwd, a.mode))
 }
 
+// Compress 压缩当前会话上下文（/compress）：用当前模型对全量历史做一次
+// 无工具总结，流式输出总结内容（TextDeltaEvent 广播，UI/ACP 直接展示），
+// 成功后将摘要写入会话 meta（context_summary），后续请求经 runOnce 作为
+// 头部上下文注入，缓解截断造成的上下文不连续。
+//
+// 约束（与 Run 的对话上限一致，不豁免）：
+//   - 达到 maxConversationTurns 轮后禁止压缩（提示新开会话）
+//   - 每会话最多压缩 1 次（SummarySet 置位后拒绝）
+//
+// 总结输入为全量历史（未截断）：摘要须覆盖全部早期内容才有价值。
+func (a *Agent) Compress(ctx context.Context) error {
+	if countTurns(a.sess.ToMessages()) >= maxConversationTurns {
+		return errors.New("Conversation limit reached: this session has exceeded 60 turns. Start a new session with /new.")
+	}
+	if a.sess.SummarySet {
+		return errors.New("Conversation already compressed: each session allows at most one compression.")
+	}
+
+	// 锁内取当前模型流：/switch 可并发替换（与 runOnce 一致）
+	a.mu.Lock()
+	streamer := a.streamer
+	a.mu.Unlock()
+
+	stream, err := streamer.StreamText(ctx, llm.StreamRequest{
+		System:   compressSystemPrompt,
+		Messages: a.sess.ToMessages(), // 全量历史：总结输入需完整
+		MaxSteps: a.cfg.Agent.MaxSteps,
+	})
+	if err != nil {
+		return fmt.Errorf("模型调用失败: %w", err)
+	}
+
+	// 消费流（无工具，仅文本增量 + Finish）
+	var fullText strings.Builder
+	var usage llm.Usage
+	for ch := range stream.Chunks() {
+		switch {
+		case ch.Err != nil:
+			return ch.Err
+		case ch.Text != "":
+			fullText.WriteString(ch.Text)
+			a.emit(TextDeltaEvent{Text: ch.Text})
+		case ch.Finish:
+			usage = ch.Usage
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return err
+	}
+
+	a.emit(TextDoneEvent{FullText: fullText.String()})
+	// 空总结视为压缩失败：不写 meta、不消耗唯一 1 次压缩机会（可重试）
+	if strings.TrimSpace(fullText.String()) == "" {
+		return errors.New("Compression failed: the model returned an empty summary. Please try again.")
+	}
+	if err := a.sess.AppendSummary(fullText.String()); err != nil {
+		return fmt.Errorf("保存压缩摘要失败: %w", err)
+	}
+	a.emit(DoneEvent{Usage: usage})
+	return nil
+}
+
 // buildPrompt 组装当前模式的系统提示词（含项目 AGENTS.md 与 skills 列表，
 // 每次实时读取：/init、手改 AGENTS.md 或 skills 变更后下一次对话立即生效，无需重启）。
 func (a *Agent) buildPrompt() string {
@@ -183,6 +245,12 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 	history := truncateMessages(all, defaultMaxHistoryTurns)
 	if countTurns(history) != countTurns(all) {
 		a.sess.AppendMeta("context_truncated", truncationNote(countTurns(all), countTurns(history)))
+	}
+	// 压缩摘要头部注入：summary 存于 meta（不在 History），故必须在截断之后
+	// 前置——不参与轮次统计（countTurns 只数 History 的 user 消息），
+	// 也不会被截断切掉（截断起点始终在其之后的对话消息中）。
+	if a.sess.SummarySet && a.sess.Summary != "" {
+		history = append([]llm.Message{{Role: llm.RoleUser, Content: summaryPrefix + a.sess.Summary}}, history...)
 	}
 
 	// 组装请求

@@ -348,6 +348,9 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 	if isInitCommand(text) {
 		// 与 TUI /init 一致：整条消息（含参数）记入会话，走 init 系统提示词
 		err = st.ag.RunInit(runCtx, text)
+	} else if isCompressCommand(text) {
+		// 与 TUI /compress 一致：压缩全量历史并注入后续上下文（消息不记入会话）
+		err = st.ag.Compress(runCtx)
 	} else {
 		err = st.ag.Run(runCtx, text)
 	}
@@ -733,8 +736,8 @@ func (a *Agent) configOptions(st *sessionState) []acpsdk.SessionConfigOption {
 	}
 }
 
-// sendAvailableCommands 宣告可用 /命令：ACP 模式下仅 /init（命令名不带斜杠，
-// 斜杠由 client 展示层添加）。
+// sendAvailableCommands 宣告可用 /命令：ACP 模式下仅 /init 与 /compress
+// （命令名不带斜杠，斜杠由 client 展示层添加）。
 func (a *Agent) sendAvailableCommands(sid acpsdk.SessionId) {
 	if a.conn == nil {
 		return
@@ -742,13 +745,19 @@ func (a *Agent) sendAvailableCommands(sid acpsdk.SessionId) {
 	_ = a.conn.SessionUpdate(context.Background(), acpsdk.SessionNotification{
 		SessionId: sid,
 		Update: acpsdk.SessionUpdate{AvailableCommandsUpdate: &acpsdk.SessionAvailableCommandsUpdate{
-			AvailableCommands: []acpsdk.AvailableCommand{{
-				Name:        "init",
-				Description: "Analyze the project and generate/refresh AGENTS.md",
-				Input: &acpsdk.AvailableCommandInput{Unstructured: &acpsdk.UnstructuredCommandInput{
-					Hint: "Optional extra requirements for the init task",
-				}},
-			}},
+			AvailableCommands: []acpsdk.AvailableCommand{
+				{
+					Name:        "init",
+					Description: "Analyze the project and generate/refresh AGENTS.md",
+					Input: &acpsdk.AvailableCommandInput{Unstructured: &acpsdk.UnstructuredCommandInput{
+						Hint: "Optional extra requirements for the init task",
+					}},
+				},
+				{
+					Name:        "compress",
+					Description: "Summarize the full conversation once and inject it as context",
+				},
+			},
 			SessionUpdate: "available_commands_update",
 		}},
 	})
@@ -803,4 +812,11 @@ func extractPromptText(blocks []acpsdk.ContentBlock) string {
 func isInitCommand(text string) bool {
 	t := strings.TrimSpace(text)
 	return t == "/init" || strings.HasPrefix(t, "/init ")
+}
+
+// isCompressCommand 判断用户消息是否为 /compress 命令（无参数；带参数的
+// 写法与 TUI 一致：触发压缩并忽略参数）。
+func isCompressCommand(text string) bool {
+	t := strings.TrimSpace(text)
+	return t == "/compress" || strings.HasPrefix(t, "/compress ")
 }

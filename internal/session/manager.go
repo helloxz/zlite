@@ -208,11 +208,13 @@ func (m *Manager) open(path string) (*Session, error) {
 
 	head := recs[0]
 	// 只保留模型相关记录（meta 不进入 History，与 Append 行为一致）；
-	// meta 中恢复会话标题（title 事件）；旧会话无 title meta 时
-	// 从历史首条用户消息补提取（仅内存，不落盘）。
+	// meta 中恢复会话标题（title 事件）与压缩摘要（context_summary 事件）；
+	// 旧会话无 title meta 时从历史首条用户消息补提取（仅内存，不落盘）。
 	var hist []Record
 	title := ""
 	titleSet := false
+	summary := ""
+	summarySet := false
 	msgCount := 0
 	for _, r := range recs[1:] {
 		switch r.Type {
@@ -225,6 +227,10 @@ func (m *Manager) open(path string) (*Session, error) {
 			if r.Event == metaTitleEvent {
 				title = r.Value
 				titleSet = true
+			}
+			if r.Event == metaSummaryEvent {
+				summary = r.Value
+				summarySet = true
 			}
 		}
 	}
@@ -241,6 +247,7 @@ func (m *Manager) open(path string) (*Session, error) {
 		ID: head.ID, Path: path, file: f,
 		Mode: head.Mode, Model: head.Model, Provider: head.Provider,
 		Title: title, History: hist, titleSet: titleSet,
+		Summary: summary, SummarySet: summarySet,
 		CreatedAt: head.CreatedAt, metaPath: metaPathFor(path),
 		metaMessages: msgCount,
 	}

@@ -29,6 +29,7 @@ type agentFace interface {
 	Events() <-chan agent.Event
 	Run(ctx context.Context, msg string) error
 	RunInit(ctx context.Context, msg string) error
+	Compress(ctx context.Context) error
 	SetMode(m agent.Mode)
 	Mode() agent.Mode
 	SetThinking(t string)
@@ -261,6 +262,8 @@ func (t *TUI) handleCommand(cmd string) error {
 		return t.handleSkills()
 	case "/init":
 		return t.initProject(args)
+	case "/compress":
+		return t.compressConversation()
 	case "/help":
 		t.chat.appendSystem(helpText)
 	default:
@@ -450,6 +453,29 @@ func (t *TUI) switchToModel(name string) error {
 	return nil
 }
 
+// compressConversation 执行 /compress：请求 agent 对全量历史做一次总结并
+// 注入后续上下文。与 /init 同模式：busy 置位后异步执行，完成后由
+// agentDoneMsg 统一收尾（busy 复位 + [done] + 错误展示）。
+func (t *TUI) compressConversation() error {
+	if t.status.busy {
+		t.chat.appendSystem("(still processing the previous message, please wait)")
+		return nil
+	}
+	t.chat.appendSystem("Compressing conversation: summarizing the full history...")
+	t.status.setBusy(true)   // 同步置位（同 submit：消除 busy 检查的 TOCTOU 窗口）
+	t.chat.startProcessing() // 同步显示 [processing...]（压缩完成由 runCompress 置 done）
+	go t.runCompress()
+	return nil
+}
+
+// runCompress 在后台执行压缩（busy 已由 compressConversation 同步置位）。
+func (t *TUI) runCompress() {
+	err := t.agent.Compress(t.ctx)
+	if t.program != nil {
+		t.program.Send(agentDoneMsg{err: err})
+	}
+}
+
 // splitCommand 把斜杠命令拆分为命令名与参数："/init 补充要求" → ("/init", "补充要求")。
 func splitCommand(cmd string) (name, args string) {
 	trimmed := strings.TrimSpace(cmd)
@@ -604,6 +630,7 @@ type commandInfo struct {
 // commandInfos 是全部可用命令。注意 /exit 与 /quit 同义（都退出）。
 var commandInfos = []commandInfo{
 	{"/init", "Analyze the project and generate/refresh AGENTS.md"},
+	{"/compress", "Summarize the full conversation once and inject it as context"},
 	{"/new", "Start a new session (Ctrl+N; mode resets to plan)"},
 	{"/plan", "Switch to plan mode (read-only: inspect and search only)"},
 	{"/build", "Switch to build mode (writable: modify files, run commands)"},

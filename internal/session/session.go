@@ -13,6 +13,11 @@ import (
 // metaTitleEvent 是标题落盘的 meta 事件名（首条用户消息时写入）。
 const metaTitleEvent = "title"
 
+// metaSummaryEvent 是压缩摘要落盘的 meta 事件名（/compress 成功时写入）。
+// 摘要不进入 History（不参与模型消息序列与轮次统计），仅在组装请求时
+// 作为头部上下文注入；重启恢复由 open() 读取本事件重建。
+const metaSummaryEvent = "context_summary"
+
 // maxTitleRunes 是会话标题最大字符数（按 rune 计数，避免截断中文）。
 const maxTitleRunes = 30
 
@@ -32,6 +37,11 @@ type Session struct {
 	// titleSet 标记标题已确定（区别于 Title=="" 的未设置状态）：
 	// 首条消息为纯空白时标题为空串，但仍视为已确定，避免重复写 meta。
 	titleSet bool
+
+	// Summary 是压缩摘要（/compress 产物，存于 meta 记录，不在 History 中）。
+	// SummarySet 标记已压缩：每会话最多压缩 1 次，置位后拒绝再次压缩。
+	Summary    string
+	SummarySet bool
 
 	// meta 派生缓存（列表用，见 meta.go）：metaPath 是 <path>.jsonl.meta；
 	// metaMessages 是内存中的 TypeMessage 计数，Append 时同步刷新并落盘。
@@ -141,6 +151,18 @@ func (s *Session) AppendToolResult(callID, name, output string, err bool, dur ti
 // AppendMeta 记录元事件（模式切换等，不参与模型上下文）。
 func (s *Session) AppendMeta(event, value string) error {
 	return s.Append(Record{Type: TypeMeta, Event: event, Value: value})
+}
+
+// AppendSummary 落盘压缩摘要（/compress 成功时调用）。
+// 与 AppendUser 的标题模式一致：meta 写入成功后才更新内存状态，
+// 失败时调用方重试不会出现内存与落盘不一致。
+func (s *Session) AppendSummary(content string) error {
+	if err := s.AppendMeta(metaSummaryEvent, content); err != nil {
+		return err
+	}
+	s.Summary = content
+	s.SummarySet = true
+	return nil
 }
 
 // ToMessages 把历史转换为模型消息序列。
