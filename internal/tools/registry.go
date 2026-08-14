@@ -50,6 +50,7 @@ func New(cwd string, confirmCommands []string) *Registry {
 	r.register(grepTool(cwd))
 	r.register(globTool(cwd))
 	r.register(webFetchTool())
+	r.register(webSearchTool())
 	r.register(runCommandPlanTool(cwd))
 	r.register(runCommandBuildTool(cwd, confirmCommands))
 	r.register(writeFileTool(cwd))

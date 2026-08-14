@@ -28,7 +28,7 @@ type webFetchInput struct {
 func webFetchTool() Tool {
 	client := &http.Client{Timeout: webFetchTimeout}
 	return Tool{
-		GoAITool: goai.NewTool("web_fetch", "抓取网页内容并转为纯文本。用于查阅文档、搜索资料。HTML 页面会去除标签与脚本，返回可读文本。",
+		GoAITool: goai.NewTool("web_fetch", "抓取指定 URL 的网页内容并转为纯文本。用于查阅文档、访问已知链接（如 web_search 返回的结果）。HTML 页面会去除标签与脚本，返回可读文本。",
 			func(ctx context.Context, in webFetchInput) (string, error) {
 				if in.URL == "" {
 					return "", fmt.Errorf("url 不能为空")
@@ -87,5 +87,3 @@ func webFetchTool() Tool {
 		Modes: []Mode{ModePlan, ModeBuild},
 	}
 }
-
-
