@@ -170,18 +170,19 @@ func (c *chatView) render() {
 			fmt.Fprintln(c.view)
 		case "assistant":
 			head := " Zlite: "
+			mark, markFg := "", ""
 			switch e.thinking {
 			case "processing":
 				// 生成中：标记后换行，流式内容从下一行出现
-				head += "[processing...]"
+				mark, markFg = "[processing...]", ansiFgProc
 			case "thinking":
 				// 思考中（后端返回了思维链）：标记后换行，流式内容从下一行出现
-				head += "[thinking...]"
+				mark, markFg = "[thinking...]", ansiFgThink
 			case "done":
 				// 生成结束：统一 [done]，输出内容在下方
-				head += "[done]"
+				mark, markFg = "[done]", ansiFgDone
 			}
-			fmt.Fprintln(c.view, paintLine(head, ansiBarZlite, w))
+			fmt.Fprintln(c.view, paintBar(head, mark, markFg, ansiBarZlite, w))
 			if e.text != "" {
 				fmt.Fprintln(c.view, c.md.Render(e.text))
 			}

@@ -16,6 +16,10 @@ const (
 	ansiBarUser  = "\x1b[38;5;116m\x1b[48;5;237m" // 浅青字 + 深灰底
 	ansiBarZlite = "\x1b[38;5;250m\x1b[48;5;236m" // 浅灰字 + 更深灰底
 	ansiBarTool  = "\x1b[38;5;187m\x1b[48;5;236m" // 浅khaki 字 + 深灰底
+	// 助手状态标记：只改前景，灰底由头带 SGR 延续。
+	ansiFgProc  = "\x1b[38;5;214m" // processing 琥珀
+	ansiFgThink = "\x1b[38;5;111m" // thinking 柔蓝
+	ansiFgDone  = "\x1b[38;5;114m" // done 柔绿
 )
 
 // colorize 用指定 ANSI 颜色码包裹文本。
@@ -38,6 +42,24 @@ func paintLine(s, style string, w int) string {
 		}
 	}
 	return style + s + ansiReset
+}
+
+// paintBar 在头带上给状态标记换前景（不 reset，灰底延续到行尾补空格）。
+func paintBar(label, status, statusFg, style string, w int) string {
+	s := label + status
+	if s == "" {
+		return ""
+	}
+	pad := ""
+	if w > 0 {
+		if n := displayWidth(s); n < w {
+			pad = strings.Repeat(" ", w-n)
+		}
+	}
+	if status == "" || statusFg == "" {
+		return style + s + pad + ansiReset
+	}
+	return style + label + statusFg + status + pad + ansiReset
 }
 
 // mdRenderer 做轻量渲染（design.md 决策 D5）：
