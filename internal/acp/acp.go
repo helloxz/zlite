@@ -360,7 +360,15 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 		}
 		return acpsdk.PromptResponse{}, err
 	}
-	return acpsdk.PromptResponse{StopReason: acpsdk.StopReasonEndTurn}, nil
+	return acpsdk.PromptResponse{
+		StopReason: acpsdk.StopReasonEndTurn,
+		// _meta 是 ACP 官方扩展机制：附带当前会话轮次信息供 client 展示/预警
+		// （协议规定 client 不得对 _meta 值做假设，透传安全）。
+		Meta: map[string]any{
+			"turns":     st.ag.Turns(),
+			"max_turns": st.ag.MaxTurns(),
+		},
+	}, nil
 }
 
 // ---- 会话配置 ----

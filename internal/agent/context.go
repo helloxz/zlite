@@ -18,6 +18,10 @@ const defaultMaxHistoryTurns = 30
 // 过长会话会稀释早期上下文、降低模型效果，提示用户新开会话（/new）。
 const maxConversationTurns = 60
 
+// compressMinTurns 是压缩的最低对话轮次：不足时压缩无意义
+// （上下文尚未截断，一次总结调用纯属浪费），直接报错提示。
+const compressMinTurns = 10
+
 // compressSystemPrompt 是压缩总结的系统提示词（/compress 用）：要求输出
 // 结构化事实清单，保真关键标识符（文件路径/符号名/命令/报错原文），
 // 供后续轮次替代原文作为上下文使用。

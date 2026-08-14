@@ -125,6 +125,16 @@ func (a *Agent) History() []llm.Message {
 	return a.sess.ToMessages()
 }
 
+// Turns 返回当前会话的对话轮次（user 消息数；压缩摘要存于 meta，不计入）。
+func (a *Agent) Turns() int {
+	return countTurns(a.sess.ToMessages())
+}
+
+// MaxTurns 返回单会话对话轮次上限（与 Run/Compress 的拒绝阈值一致）。
+func (a *Agent) MaxTurns() int {
+	return maxConversationTurns
+}
+
 // Run 执行一轮对话：追加用户消息 → 模型生成（含工具循环）→ 落盘。
 func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	if strings.TrimSpace(userMsg) == "" {
@@ -166,6 +176,9 @@ func (a *Agent) Compress(ctx context.Context) error {
 	}
 	if a.sess.SummarySet {
 		return errors.New("Conversation already compressed: each session allows at most one compression.")
+	}
+	if countTurns(a.sess.ToMessages()) < compressMinTurns {
+		return fmt.Errorf("Cannot compress yet: this session has fewer than %d turns. Compression is only useful for longer conversations.", compressMinTurns)
 	}
 
 	// 锁内取当前模型流：/switch 可并发替换（与 runOnce 一致）

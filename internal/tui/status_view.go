@@ -11,8 +11,8 @@ import (
 // ansiPathGray 是状态栏右侧项目路径的灰色前景（与左侧信息区分）。
 const ansiPathGray = "\x1b[38;5;244m"
 
-// statusView 是底部状态栏的纯状态模型：模式 / 模型 / token 用量 / 忙碌 /
-// 思考强度 / 工作目录。渲染由 model.View() 经 title(w) 生成（边框盒）。
+// statusView 是底部状态栏的纯状态模型：模式 / 模型 / 思考强度 / 忙碌 /
+// 对话轮次 / 工作目录。渲染由 model.View() 经 title(w) 生成（边框盒）。
 type statusView struct {
 	mode  agent.Mode
 	model string
@@ -20,12 +20,21 @@ type statusView struct {
 	busy  bool
 	// thinking 是当前思考强度显示值（默认 auto）。
 	thinking string
+	// turns 是当前会话对话轮次（如 12/60；agentDoneMsg/切会话/新会话时刷新）。
+	turns    int
+	maxTurns int
 	// cwd 是项目工作目录（展示在状态栏最右侧，灰色，左右对齐）。
 	cwd string
 }
 
 func newStatusView(model, cwd string) *statusView {
 	return &statusView{mode: agent.ModePlan, model: model, thinking: "auto", cwd: cwd}
+}
+
+// setTurns 更新对话轮次显示（当前轮次与上限；maxTurns<=0 时不显示轮次）。
+func (s *statusView) setTurns(turns, maxTurns int) {
+	s.turns = turns
+	s.maxTurns = maxTurns
 }
 
 func (s *statusView) setMode(m agent.Mode) {
@@ -73,8 +82,12 @@ func (s *statusView) title(w int) string {
 		modeStr = colorize(modeStr, ansiRed)
 	}
 	model := truncateDisplay(s.model, 28)
-	left := fmt.Sprintf(" [%s] %s | thinking: %s | /help for commands%s ",
-		modeStr, model, s.thinking, busy)
+	turns := ""
+	if s.maxTurns > 0 {
+		turns = fmt.Sprintf(" | turns %d/%d", s.turns, s.maxTurns)
+	}
+	left := fmt.Sprintf(" [%s] %s%s | thinking: %s | /help for commands%s ",
+		modeStr, model, turns, s.thinking, busy)
 	leftW := displayWidth(left)
 
 	pathText := s.cwd

@@ -30,6 +30,8 @@ type agentFace interface {
 	Run(ctx context.Context, msg string) error
 	RunInit(ctx context.Context, msg string) error
 	Compress(ctx context.Context) error
+	Turns() int
+	MaxTurns() int
 	SetMode(m agent.Mode)
 	Mode() agent.Mode
 	SetThinking(t string)
@@ -432,6 +434,7 @@ func (t *TUI) switchToSession(id string) error {
 	}
 	if t.agent != nil {
 		t.chat.loadHistory(t.agent.History())
+		t.status.setTurns(t.agent.Turns(), t.agent.MaxTurns()) // 切换会话后同步轮次显示
 	}
 	t.setModel(model) // 会话记录的模型可能被恢复，状态栏同步（消息循环内，不发消息）
 	t.chat.appendSystem("Switched to session " + id)
@@ -539,6 +542,9 @@ func (t *TUI) newChat() error {
 	}
 	t.chat.reset()
 	t.chat.appendSystem("New session started")
+	if t.agent != nil {
+		t.status.setTurns(t.agent.Turns(), t.agent.MaxTurns()) // 新会话轮次归零
+	}
 	t.agent.SetMode(agent.ModePlan) // /new 后模式重置为 plan
 	return nil
 }

@@ -131,6 +131,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentDoneMsg:
 		t.status.setBusy(false)
 		t.chat.finishProcessing() // 整轮生成结束：统一置 [done]
+		if t.agent != nil {
+			// 轮次变化：Run/Compress 结束后刷新状态栏 turns 显示
+			t.status.setTurns(t.agent.Turns(), t.agent.MaxTurns())
+		}
 		if msg.err != nil {
 			t.chat.appendSystem(colorize("Error: "+msg.err.Error(), ansiRed))
 		}
