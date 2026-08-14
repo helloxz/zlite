@@ -30,6 +30,8 @@ type chatView struct {
 	// autoScroll=true 时跟随底部（新消息自动贴底显示）；
 	// 用户上翻看历史后置 false，滚回底部时自动恢复。
 	autoScroll bool
+	// lastW 是上次 render 时的内容区宽度；layout 在宽度变化时重绘头带补空格。
+	lastW int
 }
 
 func newChatView(v *gocui.View) *chatView {
@@ -38,7 +40,7 @@ func newChatView(v *gocui.View) *chatView {
 	return &chatView{view: v, autoScroll: true}
 }
 
-// appendUser 追加用户消息（每轮对话前插入一条弱化分隔线，标明回合边界）。
+// appendUser 追加用户消息（每轮对话前插入一条空行分隔，标明回合边界）。
 // 用户主动发言视为关注最新内容：若此前正在上翻看历史，先恢复自动滚动
 // （回到底部）再追加。历史恢复（loadHistory）复用本方法，分隔线结构一致。
 func (c *chatView) appendUser(text string) {
@@ -155,42 +157,57 @@ func (c *chatView) render() {
 	_, oy := c.view.Origin() // 记录手动滚动位置（Clear 前）
 	c.view.Autoscroll = c.autoScroll
 	c.view.Clear()
+	w, _ := c.view.Size()
+	c.lastW = w
 	for _, e := range c.entries {
 		switch e.kind {
 		case "divider":
-			// 回合分隔线：弱化灰色，铺满内容区宽度
-			_, w := c.view.Size()
-			if w < 4 {
-				w = 4
-			}
-			fmt.Fprintln(c.view, colorize(strings.Repeat("-", w), ansiGray))
+			// 回合分隔：空行。角色头带已经能分出你/助手，不再画整宽虚线。
+			fmt.Fprintln(c.view)
 		case "user":
-			fmt.Fprintln(c.view, colorize("You: "+e.text, ansiCyan))
+			fmt.Fprintln(c.view, paintLine(" You: "+e.text, ansiBarUser, w))
 			// 用户消息与 AI 答复之间留一个空行，视觉上分隔输入与输出
 			fmt.Fprintln(c.view)
 		case "assistant":
-			prefix := "Zlite: "
+			head := " Zlite: "
 			switch e.thinking {
 			case "processing":
 				// 生成中：标记后换行，流式内容从下一行出现
-				prefix += colorize("[processing...]", ansiYellow) + "\n"
+				head += "[processing...]"
 			case "thinking":
 				// 思考中（后端返回了思维链）：标记后换行，流式内容从下一行出现
-				prefix += colorize("[thinking...]", ansiYellow) + "\n"
+				head += "[thinking...]"
 			case "done":
 				// 生成结束：统一 [done]，输出内容在下方
-				prefix += colorize("[done]", ansiGreen) + "\n"
+				head += "[done]"
 			}
-			fmt.Fprintln(c.view, colorize(prefix, ansiCyan)+c.md.Render(e.text))
+			fmt.Fprintln(c.view, paintLine(head, ansiBarZlite, w))
+			if e.text != "" {
+				fmt.Fprintln(c.view, c.md.Render(e.text))
+			}
 		case "tool":
-			fmt.Fprintln(c.view, colorize(e.text, ansiYellow))
+			rest := strings.TrimPrefix(e.text, "  [tool]")
+			fmt.Fprintln(c.view, paintLine(" [tool]", ansiBarTool, 0)+colorize(rest, ansiYellow))
 		case "system":
-			fmt.Fprintln(c.view, colorize(e.text, ansiCyan))
+			// 系统提示降为 dim，和用户青色头带区分；已预着色的 Error/Approved 仍走内层 SGR。
+			fmt.Fprintln(c.view, colorize(e.text, ansiDim))
 		}
 	}
 	if !c.autoScroll {
 		c.view.SetOrigin(0, c.clampOy(oy))
 	}
+}
+
+// relayout 宽度变化时重绘（头带按新宽度补空格）。高度变化只改可视区，不必重写。
+func (c *chatView) relayout() {
+	if c == nil || c.view == nil {
+		return
+	}
+	w, _ := c.view.Size()
+	if w == c.lastW {
+		return
+	}
+	c.render()
 }
 
 // clampOy 把滚动位置限制在有效范围 [0, 总行数-可视高度]（与 gocui 的

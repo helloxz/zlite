@@ -192,7 +192,8 @@ func (t *TUI) dispatch() {
 
 // Run 启动 TUI（阻塞直到退出）。
 func (t *TUI) Run() error {
-	g, err := gocui.NewGui(gocui.OutputNormal, true)
+	// Output256：头带用 236/237 深灰；8 色 SGR 仍走 outputNormal 回退。
+	g, err := gocui.NewGui(gocui.Output256, true)
 	if err != nil {
 		return fmt.Errorf("初始化终端界面失败: %w", err)
 	}
@@ -338,6 +339,8 @@ func (t *TUI) layout(g *gocui.Gui) error {
 		}
 		t.chat = newChatView(v)
 		t.chat.appendSystem("zlite ready - " + t.cwd)
+	} else if t.chat != nil {
+		t.chat.relayout()
 	}
 
 	// 列表选择弹窗 view 常驻（启动时创建一次，Visible=false 隐藏）：

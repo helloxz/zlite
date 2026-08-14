@@ -6,13 +6,16 @@ import (
 )
 
 // ANSI 颜色码（gocui 的 escape.go 解析 SGR 序列）。
+// 头带用 256 色深灰底（Run 走 Output256）；8 色码走 outputNormal 回退。
 const (
-	ansiReset  = "\x1b[0m"
-	ansiCyan   = "\x1b[36m" // 用户消息
-	ansiGreen  = "\x1b[32m" // 代码块
-	ansiYellow = "\x1b[33m" // 工具行 / 状态强调
-	ansiRed    = "\x1b[31m" // 错误
-	ansiGray   = "\x1b[90m" // 分隔线等弱化元素
+	ansiReset    = "\x1b[0m"
+	ansiGreen    = "\x1b[32m"                     // 代码块 / [ok]
+	ansiYellow   = "\x1b[33m"                     // 工具参数 / 状态强调
+	ansiRed      = "\x1b[31m"                     // 错误
+	ansiDim      = "\x1b[2m"                      // 系统提示
+	ansiBarUser  = "\x1b[38;5;116m\x1b[48;5;237m" // 浅青字 + 深灰底
+	ansiBarZlite = "\x1b[38;5;250m\x1b[48;5;236m" // 浅灰字 + 更深灰底
+	ansiBarTool  = "\x1b[38;5;187m\x1b[48;5;236m" // 浅khaki 字 + 深灰底
 )
 
 // colorize 用指定 ANSI 颜色码包裹文本。
@@ -21,6 +24,20 @@ func colorize(s, code string) string {
 		return ""
 	}
 	return code + s + ansiReset
+}
+
+// paintLine 把可见文本铺满内容区宽度并套上 SGR，形成角色头带。
+// 超宽不截断，交给 view.Wrap；w<=0 时只着色不补空格。
+func paintLine(s, style string, w int) string {
+	if s == "" {
+		return ""
+	}
+	if w > 0 {
+		if n := displayWidth(s); n < w {
+			s += strings.Repeat(" ", w-n)
+		}
+	}
+	return style + s + ansiReset
 }
 
 // mdRenderer 做轻量渲染（design.md 决策 D5）：
