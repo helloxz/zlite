@@ -172,7 +172,7 @@ func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	v := viewport.New(msg.Width, msg.Height-6)
 	m.vp = &v
 	m.ta.SetWidth(msg.Width) // 全宽背景；内容宽由 textarea 按 padding/prompt 自动折算
-	m.ta.SetHeight(1)        // 1 行内容 + View 里补 1 行装饰（inputAreaView）
+	m.ta.SetHeight(2)        // 2 行可视：内容换行可见（inputAreaView 做行交换）
 	m.refreshChat()
 	return m, nil
 }
@@ -377,24 +377,21 @@ func (m model) View() string {
 	return b.String()
 }
 
-// inputAreaView 渲染输入区：装饰空行（全宽深灰背景，视觉上形成 2 行输入区）
-// + textarea 内容行。
+// inputAreaView 渲染输入区（textarea 2 行）。
 //
-// IME preedit 跟随（中文输入）关键设计：textarea 的光标是虚拟的（光标字符
-// 画进内容），终端硬件光标由渲染器停在 View 输出末尾——输入法拼音/preedit
-// 由终端绘制在硬件光标处。因此内容行必须位于 View 输出末尾，硬件光标才与
-// 虚拟光标一致。曾尝试在 View 末尾追加光标定位序列（\x1b[..H），实测破坏
-// 渲染器增量 diff 的光标状态（后续字符写错位），已弃用。
-// 代价：内容显示在输入区视觉第 2 行（装饰行在上）。
+// 行交换说明：bubbletea alt screen 渲染器每帧把终端硬件光标强制定位到
+// View 最后一行行首（standard_renderer.flush，保证增量渲染一致）；IME
+// preedit 由终端绘制在硬件光标处。因此内容不足 2 行时把「内容行」交换到
+// 最后一行（空行在上），让硬件光标落在内容行——拼音显示在内容行行首
+// （内容前方；行内跟随受框架限制，见 docs §0.11）。
 func (m model) inputAreaView() string {
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Render(""))
-	b.WriteString("\n")
-	b.WriteString(m.ta.View())
-	return b.String()
+	v := strings.TrimSuffix(m.ta.View(), "\n")
+	lines := strings.Split(v, "\n")
+	if len(lines) == 2 && strings.TrimSpace(lines[1]) == "" {
+		// 内容 1 行：空行在上、内容行在下（内容行位于输出末尾）
+		lines[0], lines[1] = lines[1], lines[0]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // overlayChat 把弹窗盒子插入聊天区中央。

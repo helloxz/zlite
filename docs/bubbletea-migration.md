@@ -3,6 +3,25 @@
 > 状态：**M0-M4 全部完成，迁移交付**。后续 UI 优化记录见 §0.9-§0.10。
 > 目标版本：bubbletea v1.3.10 + lipgloss v1.1.0 + bubbles **v1.0.0**（textarea/viewport）。
 
+## 0.11 UI 优化三（2026-08-14，用户反馈两项）
+
+1. **输入区恢复 2 行可视**（问题 2，已修复）：`SetHeight(2)` 恢复（此前
+   改为 SetHeight(1) + 装饰行，装饰行 `Render("")` 为空字符串导致无背景、
+   视觉只剩 1 行）；`inputAreaView` 做行交换：内容不足 2 行时把内容行
+   交换到输出末尾（空行在上）。textarea wrap 宽度 = `width - padding(2)
+   - prompt(2)`，超长内容正常换行（cache 键含宽度，无缓存问题）。
+2. **IME 拼音跟随光标**（问题 1，框架限制，用户决策接受现状）：
+   - 根因：bubbletea alt screen 渲染器每帧把终端硬件光标强制定位到
+     View **最后一行行首**（`standard_renderer.flush` 末尾
+     `ansi.CursorPosition(0, len(newLines))`，为保持增量渲染一致）；
+     IME preedit 由终端绘制在硬件光标处 → 拼音永远显示在行首（内容前），
+     无法跟随行内光标。**非本仓库代码问题**。
+   - 已排除的路线：View 末尾追加定位序列（破坏渲染器 diff 光标状态，
+     内容写错位）；行交换/装饰行（只能改变"行首"所在行）。
+   - 可选补丁（用户已决策不做）：go.mod replace 本地 fork bubbletea，
+     在 flush 末尾让 model 提供光标位置（约 20 行），后续升级需同步补丁。
+   - 现状：拼音显示在输入行行首（内容前方），上屏后位置正确。
+
 ## 0.10 UI 优化二（2026-08-14，用户四项反馈）
 
 1. **输入框蓝色竖线前缀**：`ta.Prompt = "│ "` + `Focused/BlurredStyle.Prompt`
