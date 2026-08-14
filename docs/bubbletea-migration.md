@@ -1,7 +1,48 @@
 # zlite TUI 迁移方案：gocui → Bubble Tea
 
-> 状态：**M0-M4 全部完成，迁移交付**。
+> 状态：**M0-M4 全部完成，迁移交付**。后续 UI 优化记录见 §0.9-§0.10。
 > 目标版本：bubbletea v1.3.10 + lipgloss v1.1.0 + bubbles **v1.0.0**（textarea/viewport）。
+
+## 0.10 UI 优化二（2026-08-14，用户四项反馈）
+
+1. **输入框蓝色竖线前缀**：`ta.Prompt = "│ "` + `Focused/BlurredStyle.Prompt`
+   前景 `38;5;39`（Cyan）；Prompt 须在 SetWidth 之前设置（顺序天然满足）。
+2. **输入框内容 padding**：`Base.Padding(0, 1)`（左右各 1 列，背景色覆盖
+   padding 区域）；`SetWidth(msg.Width)` 改为全宽（textarea 内部按 frame
+   size 折算内容宽）。
+3. **弹窗水平居中**：`overlayChat` 此前只做 y 方向居中，盒子贴左（漏实现）；
+   新增 `x0 = (m.width - 盒宽)/2` 前缀空格（盒宽取边框行 `ansi.StringWidth`，
+   行首无 ANSI，安全）。tmux 实测 110 列下 35 空格偏移居中。
+4. **中文 IME preedit 显示在输入框第二行**（拼音与光标不同行）：
+   - 根因：textarea 光标是**虚拟的**（光标字符画进内容），终端硬件光标由
+     bubbletea 渲染器停在 **View 输出末尾**（输入区末行）；IME 拼音由终端
+     绘制在硬件光标处 → 错位到下一行。
+   - 尝试 1（弃用）：View 末尾追加 `\x1b[..H` 光标定位序列——实测**破坏
+     渲染器增量 diff 的光标状态**，后续帧字符写错位（输入内容"消失"）。
+   - 最终方案：输入区渲染为「装饰空行（236 背景）+ textarea 内容行
+     （`SetHeight(1)`）」，**内容行位于 View 输出末尾** → 硬件光标天然停在
+     内容行，IME 拼音跟随正确。代价：内容显示在输入区视觉第 2 行。
+   - 真实终端 IME 效果需用户真机确认（tmux 无 IME）。
+
+## 0.9 UI 优化（2026-08-14，用户反馈两项）
+
+1. **状态栏右侧展示项目路径**（`status_view.go`）：`title(w)` 重构为左段
+   （mode/model/thinking/busy）+ 灰色（`38;5;244`）路径右对齐，中间空格
+   填充；路径超宽时左侧截断保留尾部（`…/last/dirs`），剩余空间不足
+   `minPathWidth(14)` 时隐藏；左段超宽时截断保留核心信息——**不能返回
+   超宽字符串**（lipgloss `Width` 对超宽内容 wrap 成多行，破坏边框盒
+   布局，窄屏实测）。
+2. **输入框 2 行 + 去前缀 + 全宽背景**（`model.go`）：`ta.Prompt=""`（默认
+   `┃ `）；`SetHeight(2)` + viewport `H-7→H-6`（布局行数保持精确）；
+   `FocusedStyle.Base`/`BlurredStyle.Base` 背景 `236`（与头带一致）。
+   **坑**：textarea 默认 `CursorLine` 背景是黑色（`AdaptiveColor{Dark:"0"}`），
+   会覆盖 Base 的 236 导致光标行色块突兀——需显式设置 `CursorLine` 背景。
+3. **顺带修复**：状态栏边框 `Width(m.width)` 实际总宽 = 屏幕宽 + 2
+   （lipgloss `Width` 不含 border），右框一直被终端截断 2 列；改为
+   `Width(m.width-2)` 后右框完整。
+4. 测试：`TestStatusBarPath`（完整/截断/窄屏隐藏）、`TestResize` 高度断言
+   更新；tmux 实测：110 列全宽对齐、45 列窄屏不 wrap、输入框背景统一。
+   注意：tmux 无法注入 Shift+Enter（kitty CSI u 协议），真机终端验证。
 
 ## 0.8 M4 打磨完成（2026-08-14）
 

@@ -108,7 +108,7 @@ func New(cfg *config.Config, a agentFace, model, cwd string, newSession func() e
 		newSession: newSession,
 		thinking:   "auto",
 		chat:       chat,
-		status:     newStatusView(model),
+		status:     newStatusView(model, cwd),
 		ctx:        ctx, cancel: cancel,
 	}
 }

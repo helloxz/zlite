@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/helloxz/zlite/internal/agent"
 )
 
@@ -44,7 +45,9 @@ type refreshMsg struct{}
 // 消息只负责触发处理；tea 在每次 Update 后自动重绘，外部注入 API 的改动
 // 在下一次渲染自然生效。
 type model struct {
-	t      *TUI
+	t *TUI
+	// vp 用指针字段：viewport.Model 是值类型，若内嵌值拷贝，值接收者方法内
+	// 的 SetContent/PageUp 等 *Model 方法只会修改临时拷贝（M1 实测 bug）。
 	vp     *viewport.Model
 	ta     textarea.Model
 	width  int
@@ -55,6 +58,19 @@ func newModel(t *TUI) model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (Enter=send, Shift+Enter=newline, Tab=mode, Ctrl+C=quit)"
 	ta.ShowLineNumbers = false
+	// 每行蓝色竖线前缀（与圆角边框风格统一；Prompt 必须早于 SetWidth 设置，
+	// handleResize 中调用——顺序天然满足）。
+	ta.Prompt = "│ "
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	// 输入区全宽深灰背景（与头带 236 一致）+ 内容左右 padding 各 1 列；
+	// textarea 内部按 Base frame size 计算内容宽，SetWidth 传屏幕全宽。
+	ta.FocusedStyle.Base = lipgloss.NewStyle().Background(lipgloss.Color("236")).Padding(0, 1)
+	ta.BlurredStyle.Base = lipgloss.NewStyle().Background(lipgloss.Color("236")).Padding(0, 1)
+	// 默认 CursorLine 背景是黑色（AdaptiveColor Dark "0"），会覆盖 Base 的
+	// 236 背景导致光标行色块突兀；显式统一为深灰。
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	ta.BlurredStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("236"))
 	ta.Focus()
 	return model{t: t, ta: ta}
 }
@@ -148,16 +164,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleResize 响应窗口尺寸变化：聊天区占主体，底部状态栏（3 行边框盒）
-// + 输入区（3 行），留 1 行余量避免总行数超出屏幕被终端截断（M0 实测）。
-// vp 用指针字段：viewport.Model 是值类型，若内嵌值拷贝，值接收者方法内
-// 的 SetContent/PageUp 等 *Model 方法只会修改临时拷贝（实测 bug，已修复）。
+// + 输入区（2 行，无 Prompt 前缀），留 1 行余量避免总行数超出屏幕被终端
+// 截断（M0 实测）；输入区改为 2 行后聊天区相应 +1 行（H-6）。
 func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width, m.height = msg.Width, msg.Height
 	m.t.screenH = msg.Height // 弹窗布局用
-	v := viewport.New(msg.Width, msg.Height-7)
+	v := viewport.New(msg.Width, msg.Height-6)
 	m.vp = &v
-	m.ta.SetWidth(msg.Width - 2)
-	m.ta.SetHeight(3)
+	m.ta.SetWidth(msg.Width) // 全宽背景；内容宽由 textarea 按 padding/prompt 自动折算
+	m.ta.SetHeight(1)        // 1 行内容 + View 里补 1 行装饰（inputAreaView）
 	m.refreshChat()
 	return m, nil
 }
@@ -350,11 +365,33 @@ func (m model) View() string {
 	}
 	b.WriteString(chatStr)
 	b.WriteString("\n")
+	// 状态栏：Width(m.width-2) 保证总宽 = 屏幕宽（Width 不含 border，
+	// 此前 Width(m.width) 会使总宽超 2 列、右框被终端截断——顺带修复）。
 	b.WriteString(lipgloss.NewStyle().
-		Width(m.width).
+		Width(m.width - 2).
 		Border(lipgloss.RoundedBorder(), true, true, true, true).
 		BorderForeground(lipgloss.Color("240")).
-		Render(m.t.status.title()))
+		Render(m.t.status.title(m.width - 2)))
+	b.WriteString("\n")
+	b.WriteString(m.inputAreaView())
+	return b.String()
+}
+
+// inputAreaView 渲染输入区：装饰空行（全宽深灰背景，视觉上形成 2 行输入区）
+// + textarea 内容行。
+//
+// IME preedit 跟随（中文输入）关键设计：textarea 的光标是虚拟的（光标字符
+// 画进内容），终端硬件光标由渲染器停在 View 输出末尾——输入法拼音/preedit
+// 由终端绘制在硬件光标处。因此内容行必须位于 View 输出末尾，硬件光标才与
+// 虚拟光标一致。曾尝试在 View 末尾追加光标定位序列（\x1b[..H），实测破坏
+// 渲染器增量 diff 的光标状态（后续字符写错位），已弃用。
+// 代价：内容显示在输入区视觉第 2 行（装饰行在上）。
+func (m model) inputAreaView() string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().
+		Width(m.width).
+		Background(lipgloss.Color("236")).
+		Render(""))
 	b.WriteString("\n")
 	b.WriteString(m.ta.View())
 	return b.String()
@@ -384,7 +421,20 @@ func (m model) overlayChat(chat string) string {
 	var b strings.Builder
 	b.WriteString(strings.Join(chatLines[:y0], "\n"))
 	b.WriteString("\n")
-	b.WriteString(strings.Join(boxLines[:boxH], "\n"))
+	// 水平居中：盒子行加 x0 个前缀空格（行首无 ANSI，安全）；
+	// 盒宽取首行显示宽度（ansi.StringWidth 忽略 SGR）。
+	boxW := ansi.StringWidth(boxLines[0])
+	x0 := (m.width - boxW) / 2
+	if x0 < 0 {
+		x0 = 0
+	}
+	pad := strings.Repeat(" ", x0)
+	for i, bl := range boxLines[:boxH] {
+		b.WriteString(pad + bl)
+		if i < boxH-1 {
+			b.WriteString("\n")
+		}
+	}
 	if y0+boxH < len(chatLines) {
 		b.WriteString("\n")
 		b.WriteString(strings.Join(chatLines[y0+boxH:], "\n"))
