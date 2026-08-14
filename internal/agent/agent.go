@@ -130,6 +130,11 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	if strings.TrimSpace(userMsg) == "" {
 		return errors.New("消息不能为空")
 	}
+	// 轮次上限：达到 maxConversationTurns 轮后拒绝继续对话。
+	// 检查在 AppendUser 之前，超限的用户消息不写入会话。
+	if countTurns(a.sess.ToMessages()) >= maxConversationTurns {
+		return fmt.Errorf("Conversation limit reached: this session has exceeded %d turns. Response quality degrades on very long sessions. Start a new session with /new.", maxConversationTurns)
+	}
 	if err := a.sess.AppendUser(userMsg); err != nil {
 		return fmt.Errorf("保存用户消息失败: %w", err)
 	}
@@ -173,11 +178,11 @@ func (a *Agent) skillDescriptions() []string {
 // runOnce 是核心生成循环（Run/RunInit 共用）：截断 → 组装请求 → StreamText
 // → 事件 → 落盘。用户消息须已由调用方 AppendUser。
 func (a *Agent) runOnce(ctx context.Context, system string) error {
-	// 上下文截断
+	// 上下文截断（按轮次：超过 defaultMaxHistoryTurns 轮才丢弃最早整轮）
 	all := a.sess.ToMessages()
-	history := truncateMessages(all, defaultMaxHistoryMessages)
-	if len(history) != len(all) {
-		a.sess.AppendMeta("context_truncated", truncationNote(len(all), len(history)))
+	history := truncateMessages(all, defaultMaxHistoryTurns)
+	if countTurns(history) != countTurns(all) {
+		a.sess.AppendMeta("context_truncated", truncationNote(countTurns(all), countTurns(history)))
 	}
 
 	// 组装请求
