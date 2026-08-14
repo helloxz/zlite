@@ -86,8 +86,9 @@ type TUI struct {
 	// picker 非 nil 时表示列表选择弹窗打开（模态，仅消息循环线程读写）。
 	picker *picker
 
-	// screenH 是最近一次窗口高度（弹窗布局用；由 model.handleResize 同步）。
+	// screenH/screenW 是最近一次窗口尺寸（弹窗布局用；由 model.handleResize 同步）。
 	screenH int
+	screenW int
 
 	// approvalCh 非 nil 时表示有正在等待用户确认的危险操作
 	// （仅消息循环线程读写：Approver 经 program.Send 设置，submit 消费）。
@@ -359,13 +360,20 @@ func (t *TUI) handleSessions() error {
 	}
 	labels := make([]string, len(items))
 	ids := make([]string, len(items))
+	// 时间前置 + 固定 11 列（"01-02 15:04"），标题列右侧截断：
+	// 时间列天然对齐（无需按显示宽度 pad），长标题不会挤动时间列。
+	// 标题列宽动态：常规屏 30 列，窄屏随屏幕宽收窄（46 = 时间 11 + 间隔 2
+	// + 弹窗留白 4 + 屏幕两侧边距 29）。
+	titleW := 30
+	if t.screenW > 0 {
+		titleW = minInt(30, maxInt(8, t.screenW-46))
+	}
 	for i, it := range items {
 		title := it.Title
 		if title == "" {
 			title = "(no title)"
 		}
-		title = truncateDisplay(title, 18) // 按显示宽度截断（CJK 计 2）
-		labels[i] = "  " + padDisplay(title, 18) + " " + it.Time
+		labels[i] = "  " + it.Time + "  " + truncateDisplay(title, titleW)
 		ids[i] = it.ID
 	}
 	return t.openPicker(" Select session ", labels, ids, 0, func(id string) error {

@@ -169,6 +169,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width, m.height = msg.Width, msg.Height
 	m.t.screenH = msg.Height // 弹窗布局用
+	m.t.screenW = msg.Width
 	v := viewport.New(msg.Width, msg.Height-5)
 	m.vp = &v
 	m.ta.SetWidth(msg.Width) // 全宽背景；内容宽由 textarea 按 padding/prompt 自动折算
