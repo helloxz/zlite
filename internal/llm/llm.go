@@ -242,6 +242,9 @@ func StreamText(ctx context.Context, model *Model, req StreamRequest) (Stream, e
 		goai.WithSystem(req.System),
 		goai.WithMessages(ToProviderMessages(req.Messages)...),
 		goai.WithMaxSteps(req.MaxSteps),
+		// 429/5xx/网络错误自动重试 3 次（共最多 4 次调用），
+		// 间隔由 goai 内部指数退避（2s 起、封顶 60s）+ Retry-After 头决定。
+		goai.WithMaxRetries(3),
 	}
 	// 请求级 provider options：useResponsesAPI 与 reasoning_effort 必须合并
 	// 为一张 map（goai 的 WithProviderOptions 是整体覆盖，多次调用互相覆盖）。
