@@ -12,6 +12,7 @@ import (
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/zendev-sh/goai"
 	"github.com/zendev-sh/goai/provider"
+	"github.com/zendev-sh/goai/provider/anthropic"
 	"github.com/zendev-sh/goai/provider/compat"
 	"github.com/zendev-sh/goai/provider/openai"
 )
@@ -135,11 +136,12 @@ type Model struct {
 	resp bool // 使用 OpenAI Responses API（/v1/responses）
 }
 
-// buildModel 按指定模型名构造模型（BuildModel / BuildModelNamed 共用）：
+// buildModel 按指定模型名构造模型（BuildModelSpec 共用）：
 //   - openai.chat      → compat.Chat（Chat Completions，兼容一切自定义端点）
 //   - openai.responses → openai.Chat + useResponsesAPI=true（要求端点支持 /responses）
+//   - anthropic        → anthropic.Chat（Anthropic Messages API /v1/messages）
 //
-// 未来新增厂商（anthropic/google 等）在此追加分派即可，调用侧不变。
+// 未来新增厂商（google/ollama 等）在此追加分派即可，调用侧不变。
 func buildModel(p *config.Provider, model string) (*Model, error) {
 	switch p.Type {
 	case config.TypeOpenAIChat, "":
@@ -154,19 +156,25 @@ func buildModel(p *config.Provider, model string) (*Model, error) {
 			opts = append(opts, openai.WithAPIKey(p.APIKey))
 		}
 		return &Model{lm: openai.Chat(model, opts...), resp: true}, nil
+	case config.TypeAnthropic:
+		opts := []anthropic.Option{anthropic.WithBaseURL(p.BaseURL)}
+		if p.APIKey != "" {
+			opts = append(opts, anthropic.WithAPIKey(p.APIKey))
+		}
+		return &Model{lm: anthropic.Chat(model, opts...)}, nil
 	default:
 		return nil, fmt.Errorf("不支持的 provider type: %q", p.Type)
 	}
 }
 
-// BuildModel 按 provider 配置的第一个模型构造模型。
-func BuildModel(p *config.Provider) (*Model, error) {
-	return buildModel(p, p.Models[0])
-}
-
-// BuildModelNamed 按指定模型名构造模型（/switch 切换用，其余参数同 BuildModel）。
-// 模型名不在此校验，调用方负责从配置的模型列表中选取。
-func BuildModelNamed(p *config.Provider, model string) (*Model, error) {
+// BuildModelSpec 按模型引用 "provider_name/model_name" 解析渠道并构造模型
+// （TUI /switch、ACP 会话恢复、启动默认模型共用；引用合法性由
+// config.ResolveModelSpec 校验：渠道存在且模型在该渠道列表内）。
+func BuildModelSpec(cfg *config.Config, spec string) (*Model, error) {
+	p, model, err := cfg.ResolveModelSpec(spec)
+	if err != nil {
+		return nil, err
+	}
 	return buildModel(p, model)
 }
 

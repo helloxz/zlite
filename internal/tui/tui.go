@@ -49,15 +49,17 @@ type TUI struct {
 	// TUI 不持有 session 管理逻辑，保持零业务）。
 	newSession func() error
 
-	// models 是可选模型列表（/switch 用，来自配置 providers[0].models）；
+	// models 是可选模型引用列表（/switch 用，来自配置全部渠道的
+	// "provider_name/model_name" 扁平列表）；
 	// switchModel 执行实际切换（app.go 注入：重建模型流并注入 agent）。
 	models      []string
 	switchModel func(name string) error
 
 	// sessionItems 返回可切换的会话列表（/sessions 用，app.go 注入：
-	// 最近 20 条，含标题与创建时间）；switchSession 执行会话切换。
+	// 最近 20 条，含标题与创建时间）；switchSession 执行会话切换并返回
+	// 恢复后的模型引用（TUI 据此刷新状态栏）。
 	sessionItems  func() ([]SessionItem, error)
-	switchSession func(id string) error
+	switchSession func(id string) (string, error)
 
 	// skillsLister 返回已发现的 skills 列表（/skills 用，app.go 注入）。
 	skillsLister func() []SkillItem
@@ -151,16 +153,18 @@ type SessionItem struct {
 	Time  string // 创建时间（已格式化，如 "01-02 15:04"）
 }
 
-// SetSwitchModel 配置 /switch 命令：models 为可选模型列表（来自配置
-// providers[0].models），fn 执行实际切换（由 app.go 注入）。
+// SetSwitchModel 配置 /switch 命令：models 为可选模型引用列表
+// （"provider_name/model_name"，来自配置全部渠道，app.go 注入），
+// fn 执行实际切换（按引用解析渠道并重建模型流）。
 func (t *TUI) SetSwitchModel(models []string, fn func(name string) error) {
 	t.models = models
 	t.switchModel = fn
 }
 
 // SetSessionSwitcher 配置 /sessions 命令（Ctrl+L 共用）：
-// items 返回可切换的会话列表（最近 20 条），fn 按会话 ID 执行切换。
-func (t *TUI) SetSessionSwitcher(items func() ([]SessionItem, error), fn func(id string) error) {
+// items 返回可切换的会话列表（最近 20 条），fn 按会话 ID 执行切换
+// 并返回恢复后的模型引用（会话记录模型可解析时恢复，否则保持当前）。
+func (t *TUI) SetSessionSwitcher(items func() ([]SessionItem, error), fn func(id string) (string, error)) {
 	t.sessionItems = items
 	t.switchSession = fn
 }
@@ -475,7 +479,7 @@ func (t *TUI) handleSwitch(args string) error {
 // 默认定位到当前模型。
 func (t *TUI) openModelPicker() error {
 	if len(t.models) == 0 {
-		t.chat.appendSystem(colorize("No models configured (providers[0].models)", ansiRed))
+		t.chat.appendSystem(colorize("No models configured (add [[providers]] with models to ~/.zlite/config.toml)", ansiRed))
 		return nil
 	}
 	labels := make([]string, len(t.models))
@@ -600,13 +604,15 @@ func (t *TUI) handleSkills() error {
 
 // switchToSession 切换到指定会话并刷新聊天区为新会话的历史。
 func (t *TUI) switchToSession(id string) error {
-	if err := t.switchSession(id); err != nil {
+	model, err := t.switchSession(id)
+	if err != nil {
 		t.chat.appendSystem(colorize("Error: "+err.Error(), ansiRed))
 		return nil
 	}
 	if t.agent != nil {
 		t.chat.loadHistory(t.agent.History())
 	}
+	t.SetModel(model) // 会话记录的模型可能被恢复，状态栏同步
 	t.chat.appendSystem("Switched to session " + id)
 	return nil
 }
@@ -672,7 +678,7 @@ func truncateDisplay(s string, w int) string {
 	return s
 }
 
-// switchToModel 校验模型名并执行切换（弹窗确认与 /switch <name> 共用）。
+// switchToModel 校验模型引用并执行切换（弹窗确认与 /switch <name> 共用）。
 func (t *TUI) switchToModel(name string) error {
 	if !slices.Contains(t.models, name) {
 		t.chat.appendSystem(colorize("Unknown model: "+name+" (available: "+strings.Join(t.models, ", ")+")", ansiRed))

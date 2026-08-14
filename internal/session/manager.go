@@ -10,7 +10,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/version"
 )
 
@@ -51,7 +50,9 @@ func (m *Manager) dirFor(cwd string) string {
 }
 
 // Create 新建会话并写入首行元信息。
-func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session, error) {
+// providerName 是渠道名（空则记 "default"）；model 是模型引用
+// "provider_name/model_name"（记录在 jsonl 头部，供列表与恢复时还原渠道与模型）。
+func (m *Manager) Create(cwd, providerName, model, mode string) (*Session, error) {
 	dir := m.dirFor(cwd)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建会话目录失败: %w", err)
@@ -68,7 +69,7 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 
 	s := &Session{
 		ID: id, Path: path, file: f,
-		Mode: mode, Model: p.Models[0], Provider: p.Name,
+		Mode: mode, Model: model, Provider: providerName,
 		CreatedAt: now.Format(time.RFC3339), metaPath: metaPathFor(path),
 	}
 	if s.Provider == "" {
@@ -78,7 +79,7 @@ func (m *Manager) Create(cwd string, p *config.Provider, mode string) (*Session,
 	head := Record{
 		Type: TypeSession, ID: id,
 		Cwd: cwd, CreatedAt: now.Format(time.RFC3339),
-		Model: p.Models[0], Provider: s.Provider, Mode: mode,
+		Model: model, Provider: s.Provider, Mode: mode,
 		Version: version.String(), Ts: now.Format(time.RFC3339),
 	}
 	line, err := head.encode()

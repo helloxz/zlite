@@ -61,7 +61,7 @@ ACP client (editor)  ←──stdio──→  cmd/zlite runACP
 | 项 | 机制 | 值 | 切换方法 |
 |---|---|---|---|
 | mode（plan/build） | **双通道**：官方稳定 `Session Modes`（`NewSessionResponse.Modes`）+ `session/config` select 选项（`id="mode"`，`category="mode"`，追加在 configOptions 末尾） | `{plan, build}` | `session/set_mode` 或 `session/set_config_option`（等效，均经 `agent.SetMode`） |
-| model 列表 | `session/config` select（**UNSTABLE**） | `providers[0].models` | `session/set_config_option` → `llm.BuildModelNamed` + `agent.SetStreamer` |
+| model 列表 | `session/config` select（**UNSTABLE**） | 全渠道扁平列表 `provider_name/model_name`（`config.AllModels()`） | `session/set_config_option` → `llm.BuildModelSpec` + `agent.SetStreamer` |
 | thinking 强度 | `session/config` select（**UNSTABLE**） | `[none, auto, low, medium, high, xhigh, max]` | 同上 → `agent.SetThinking` |
 
 - config option 使用官方语义分类：`mode` / `model` / `thought_level`。
@@ -97,5 +97,5 @@ ACP client (editor)  ←──stdio──→  cmd/zlite runACP
 
 - 仅文本 prompt（image/audio/resource block 忽略）；`embeddedContext` 未声明。
 - `McpServers`、`additionalDirectories` 不支持（请求中静默忽略）。
-- 模型列表一期仅取 `providers[0]`（多渠道见 P5）。
+- 模型列表取全部渠道的 `provider_name/model_name` 引用（TUI `/switch` 同语义）；会话恢复时记录模型引用可解析则恢复，兼容旧格式（纯模型名 + 会话渠道名拼回），否则回退默认模型。
 - `session/fork`、`session/delete` 未声明（不做）。

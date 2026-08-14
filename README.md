@@ -20,15 +20,16 @@ bin/zlite --version
 首次运行会创建 `~/.zlite/config.toml`，示例：
 
 ```toml
-[[providers]]                    # 一期只取第一个，后期扩展多个
-  name = "default"
-  type = "openai.chat"            # 厂商.协议: openai.chat | openai.responses
+[[providers]]                    # 可配置多个渠道，模型以 provider_name/model_name 引用
+  name = "default"               # 渠道名（唯一、不含 /）
+  type = "openai.chat"            # 厂商.协议: openai.chat | openai.responses | anthropic
   base_url = "https://api.example.com/v1"
   api_key = "${ZLITE_DEFAULT_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
   models = ["gpt-4o"]
 
 [agent]
   mode = "plan"                  # plan（只读）| build（可写）
+  default_model = "default/gpt-4o"  # 默认模型（provider_name/model_name）；缺省取第一个渠道第一个模型
   auto_approve = false           # 信任模式（跳过写操作确认）
   max_steps = 16                 # 单轮工具循环上限
 

@@ -1,8 +1,8 @@
 // Package config 负责加载 ~/.zlite/config.toml。
 //
 // 使用 viper 解析 toml，转换为类型化 struct 后供业务代码使用；
-// 业务代码不直接接触 viper。配置结构按多 provider 数组设计（[[providers]]），
-// 一期只取第一个，后期扩展多渠道时无需迁移配置格式。
+// 业务代码不直接接触 viper。配置结构为多 provider 数组（[[providers]]），
+// 模型以 "provider_name/model_name" 引用，渠道名取自配置 name 字段。
 package config
 
 import (
@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -26,10 +27,10 @@ const (
 	ModeBuild = "build"
 
 	// Provider type 取值：厂商[.协议]。
-	// 一期支持 OpenAI 系两种协议；未来新增厂商（如 anthropic/google）
-	// 直接在此追加枚举，llm.BuildModel 里加一行分派即可。
+	// 新增厂商直接在此追加枚举，llm.buildModel 里加一行分派即可。
 	TypeOpenAIChat      = "openai.chat"      // OpenAI Chat Completions（默认，兼容一切自定义端点）
 	TypeOpenAIResponses = "openai.responses" // OpenAI Responses API（要求端点支持 /responses）
+	TypeAnthropic       = "anthropic"        // Anthropic Messages API（/v1/messages）
 )
 
 // 默认值。
@@ -54,8 +55,8 @@ type Config struct {
 }
 
 // Provider 描述一个模型渠道。
-// Type 取值见 Type* 常量（厂商.协议），缺省 openai.chat；
-// Models 至少一个，默认使用第一个。
+// Name 是渠道名（唯一、不含 /，作为模型引用 "provider_name/model_name" 的前缀）；
+// Type 取值见 Type* 常量（厂商.协议），缺省 openai.chat；Models 至少一个。
 type Provider struct {
 	Name    string   `mapstructure:"name"`
 	Type    string   `mapstructure:"type"`
@@ -71,6 +72,9 @@ type AgentCfg struct {
 	MaxSteps    int    `mapstructure:"max_steps"`
 	// LoadAgentsMD 自动加载项目根 AGENTS.md 注入系统提示词（默认开启）。
 	LoadAgentsMD bool `mapstructure:"load_agents_md"`
+	// DefaultModel 默认模型引用（provider_name/model_name），TUI/ACP 初始模型用；
+	// 缺省时取第一个渠道的第一个模型。
+	DefaultModel string `mapstructure:"default_model"`
 }
 
 // ShellCfg 是 shell 工具配置。
@@ -161,35 +165,101 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".zlite", "config.toml"), nil
 }
 
-// DefaultProvider 返回第一个 provider 并校验其合法性（一期单渠道）。
-func (c *Config) DefaultProvider() (*Provider, error) {
-	if len(c.Providers) == 0 {
-		return nil, errors.New("未配置任何 provider，请在配置文件的 [[providers]] 中填写渠道信息")
+// SplitModelSpec 把模型引用 "provider_name/model_name" 拆为渠道名与模型名：
+// 第一个 / 之前是渠道名（渠道名校验不含 /），其余部分（可含 /）是模型名，
+// 因此支持 "deepseek/deepseek-ai/deepseek-chat" 这类模型名自带斜杠的引用。
+func SplitModelSpec(spec string) (provider, model string, err error) {
+	i := strings.IndexByte(spec, '/')
+	if i <= 0 || i == len(spec)-1 {
+		return "", "", fmt.Errorf("非法模型引用: %q（应为 provider_name/model_name）", spec)
 	}
-	p := c.Providers[0] // 副本，避免外部修改内部状态
-	if p.Type == "" {
-		p.Type = defaultType // 缺省 openai.chat
-	}
-	switch p.Type {
-	case TypeOpenAIChat, TypeOpenAIResponses:
-	default:
-		return nil, fmt.Errorf("providers[0].type 暂不支持: %q（当前支持 %q / %q）", p.Type, TypeOpenAIChat, TypeOpenAIResponses)
-	}
-	if p.BaseURL == "" {
-		return nil, errors.New("providers[0].base_url 未配置")
-	}
-	if len(p.Models) == 0 {
-		return nil, errors.New("providers[0].models 未配置（至少填写一个模型）")
-	}
-	for _, m := range p.Models {
-		if m == "" {
-			return nil, errors.New("providers[0].models 含空模型名")
-		}
-	}
-	return &p, nil
+	return spec[:i], spec[i+1:], nil
 }
 
-// validate 校验全局配置项。
+// ResolveProvider 按渠道名查找渠道（返回副本，避免外部修改内部状态）。
+func (c *Config) ResolveProvider(name string) (*Provider, error) {
+	for i := range c.Providers {
+		if c.Providers[i].Name == name {
+			return &c.Providers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("未找到渠道 %q（已配置: %s）", name, providerNames(c.Providers))
+}
+
+// providerNames 返回渠道名列表（错误提示用）。
+func providerNames(ps []Provider) string {
+	names := make([]string, 0, len(ps))
+	for _, p := range ps {
+		names = append(names, p.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// ResolveModelSpec 按模型引用 "provider_name/model_name" 解析渠道与模型，
+// 并校验模型在该渠道的 models 列表内（配置变更后引用可能失效）。
+func (c *Config) ResolveModelSpec(spec string) (*Provider, string, error) {
+	name, model, err := SplitModelSpec(spec)
+	if err != nil {
+		return nil, "", err
+	}
+	p, err := c.ResolveProvider(name)
+	if err != nil {
+		return nil, "", err
+	}
+	if !slices.Contains(p.Models, model) {
+		return nil, "", fmt.Errorf("模型 %q 不在渠道 %q 的 models 列表中", model, name)
+	}
+	return p, model, nil
+}
+
+// DefaultModelName 返回默认模型引用 "provider_name/model_name"：
+// agent.default_model 优先（并校验可解析），缺省取第一个渠道的第一个模型。
+func (c *Config) DefaultModelName() (string, error) {
+	if len(c.Providers) == 0 {
+		return "", errors.New("未配置任何 provider，请在配置文件的 [[providers]] 中填写渠道信息")
+	}
+	if c.Agent.DefaultModel != "" {
+		if _, _, err := c.ResolveModelSpec(c.Agent.DefaultModel); err != nil {
+			return "", fmt.Errorf("agent.default_model: %w", err)
+		}
+		return c.Agent.DefaultModel, nil
+	}
+	p := c.Providers[0]
+	return p.Name + "/" + p.Models[0], nil
+}
+
+// RestoreModelSpec 还原会话记录的模型引用：记录为新格式（provider_name/model_name）
+// 直接校验；旧格式（纯模型名）用会话记录的渠道名拼回校验；均无法解析返回错误
+// （调用方回退默认模型）。配置变更后记录可能失效。
+func (c *Config) RestoreModelSpec(providerName, model string) (string, error) {
+	if model == "" {
+		return "", errors.New("会话未记录模型")
+	}
+	if _, _, err := c.ResolveModelSpec(model); err == nil {
+		return model, nil
+	}
+	if providerName != "" {
+		spec := providerName + "/" + model
+		if _, _, err := c.ResolveModelSpec(spec); err == nil {
+			return spec, nil
+		}
+	}
+	return "", fmt.Errorf("会话记录的模型 %q 无法解析", model)
+}
+
+// AllModels 返回全部渠道的模型引用扁平列表 "provider_name/model_name"，
+// 按配置顺序排列（TUI /switch 与 ACP 模型选项的数据源）。
+func (c *Config) AllModels() []string {
+	var out []string
+	for _, p := range c.Providers {
+		for _, m := range p.Models {
+			out = append(out, p.Name+"/"+m)
+		}
+	}
+	return out
+}
+
+// validate 校验全局配置项：agent/session 段 + 全部渠道（type/base_url/models/name）。
 func (c *Config) validate() error {
 	switch c.Agent.Mode {
 	case ModePlan, ModeBuild:
@@ -202,23 +272,62 @@ func (c *Config) validate() error {
 	if c.Session.Keep <= 0 {
 		return fmt.Errorf("session.keep 必须为正整数，当前: %d", c.Session.Keep)
 	}
+	seen := make(map[string]bool, len(c.Providers))
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		idx := fmt.Sprintf("providers[%d]", i)
+		if p.Name == "" {
+			return fmt.Errorf("%s.name 未配置", idx)
+		}
+		if strings.Contains(p.Name, "/") {
+			return fmt.Errorf("%s.name 不能包含 '/'（当前: %q），渠道名是模型引用 provider_name/model_name 的前缀", idx, p.Name)
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("渠道名重复: %q", p.Name)
+		}
+		seen[p.Name] = true
+		typ := p.Type
+		if typ == "" {
+			typ = defaultType // 缺省 openai.chat
+		}
+		switch typ {
+		case TypeOpenAIChat, TypeOpenAIResponses, TypeAnthropic:
+		default:
+			return fmt.Errorf("%s.type 暂不支持: %q（当前支持 %q / %q / %q）", idx, typ, TypeOpenAIChat, TypeOpenAIResponses, TypeAnthropic)
+		}
+		if p.BaseURL == "" {
+			return fmt.Errorf("%s.base_url 未配置", idx)
+		}
+		if len(p.Models) == 0 {
+			return fmt.Errorf("%s.models 未配置（至少填写一个模型）", idx)
+		}
+		for _, m := range p.Models {
+			if m == "" {
+				return fmt.Errorf("%s.models 含空模型名", idx)
+			}
+		}
+	}
+	// default_model 引用必须可解析（渠道存在且模型在列表内）
+	if c.Agent.DefaultModel != "" {
+		if _, _, err := c.ResolveModelSpec(c.Agent.DefaultModel); err != nil {
+			return fmt.Errorf("agent.default_model: %w", err)
+		}
+	}
 	return nil
 }
 
 var envPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // NeedsSetup 判断是否需要首次引导配置：
-// providers 为空、或第一个 provider 的 name 不是 "default"、或 api_key 为空（展开后）。
+// 存在任一已配置（name 非空且 api_key 非空，展开后）的渠道即视为已配置。
 // 注意：api_key = "${ZLITE_DEFAULT_API_KEY}" 且 .env 已设置时，展开后非空，视为已配置。
 func (c *Config) NeedsSetup() bool {
-	if len(c.Providers) == 0 {
-		return true
+	for _, p := range c.Providers {
+		if p.Name != "" && p.APIKey != "" {
+			return false
+		}
 	}
-	p := c.Providers[0]
-	if p.Name != "default" {
-		return true
-	}
-	return p.APIKey == ""
+	return true
 }
 
 // SetupInput 是一次引导配置的输入（ApplySetup 的入参）。
@@ -347,15 +456,16 @@ func WriteTemplate(path string) error {
 # 修改后需重启 zlite 生效；api_key 支持 ${ENV} 形式引用环境变量，
 # 变量可写在 ~/.zlite/.env（推荐，避免密钥落盘）或 shell 环境里。
 
-[[providers]]                    # 一期只取第一个，后期扩展多个
-  name = "default"
-  type = "openai.chat"           # 厂商.协议：openai.chat | openai.responses
+[[providers]]                    # 可配置多个渠道，模型以 provider_name/model_name 引用
+  name = "default"               # 渠道名（唯一、不含 /）
+  type = "openai.chat"           # 厂商.协议：openai.chat | openai.responses | anthropic
   base_url = "https://api.example.com/v1"
   api_key = "${ZLITE_DEFAULT_API_KEY}"   # 放 ~/.zlite/.env: ZLITE_DEFAULT_API_KEY=sk-...
-  models = ["gpt-4o", "gpt-4o-mini"]   # 可多个，默认使用第一个
+  models = ["gpt-4o", "gpt-4o-mini"]   # 可多个
 
 [agent]
   mode = "plan"                  # plan（只读）| build（可写）
+  default_model = "default/gpt-4o"  # 默认模型（provider_name/model_name）；缺省取第一个渠道第一个模型
   auto_approve = false           # 信任模式（跳过危险命令确认）
   max_steps = 16                 # 单轮工具循环上限
   load_agents_md = true          # 自动加载项目根 AGENTS.md 注入系统提示词

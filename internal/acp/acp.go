@@ -31,6 +31,7 @@ import (
 // 会话配置选项 ID（client 经 session/set_config_option 切换）。
 // mode 选项是 Session Modes（NewSessionResponse.Modes）之外的双通道补充：
 // 兼容只实现 session/config 通道的客户端（官方分类 category="mode"）。
+// model 选项值格式为 provider_name/model_name（渠道名取自配置 name）。
 const (
 	configOptionModel    = "model"
 	configOptionThinking = "thinking"
@@ -43,9 +44,10 @@ var thinkingEfforts = []string{"none", "auto", "low", "medium", "high", "xhigh",
 
 // Options 是 Agent 的构造参数（cmd 入口组装）。
 type Options struct {
-	Cfg       *config.Config
-	Provider  *config.Provider // 当前渠道（一期单渠道）
-	ModelName string           // 初始模型名（providers[0].models[0]）
+	Cfg *config.Config
+	// ModelName 是初始模型引用（provider_name/model_name），新会话默认使用；
+	// 会话恢复时若记录的模型引用可解析则用记录值，否则回退此值。
+	ModelName string
 	// Cwd 是进程工作目录；client 请求未指定 cwd 时的回退值。
 	Cwd string
 	Mgr *session.Manager
@@ -53,7 +55,7 @@ type Options struct {
 	// 项目 skills 目录按各会话的 cwd 动态构建。为空时不启用 skills。
 	GlobalSkillsDir string
 	AutoApprove     bool // 信任模式：跳过权限确认
-	// Streamer 覆盖默认模型流（测试注入 fake 用；nil 时按 Provider 构建）。
+	// Streamer 覆盖默认模型流（测试注入 fake 用；nil 时按 Cfg 构建）。
 	Streamer llm.Streamer
 }
 
@@ -139,7 +141,12 @@ func (a *Agent) NewSession(ctx context.Context, params acpsdk.NewSessionRequest)
 	if err != nil {
 		return acpsdk.NewSessionResponse{}, err
 	}
-	zs, err := a.opts.Mgr.Create(cwd, a.opts.Provider, a.opts.Cfg.Agent.Mode)
+	// 初始渠道名从默认模型引用解析（Create 记录渠道名供会话恢复）
+	p, _, err := a.opts.Cfg.ResolveModelSpec(a.opts.ModelName)
+	if err != nil {
+		return acpsdk.NewSessionResponse{}, fmt.Errorf("初始模型引用无效: %w", err)
+	}
+	zs, err := a.opts.Mgr.Create(cwd, p.Name, a.opts.ModelName, a.opts.Cfg.Agent.Mode)
 	if err != nil {
 		return acpsdk.NewSessionResponse{}, err
 	}
@@ -410,11 +417,11 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 		case params.ValueId != nil:
 			switch params.ValueId.ConfigId {
 			case configOptionModel:
-				name := string(params.ValueId.Value)
-				if !slices.Contains(a.opts.Provider.Models, name) {
-					return fmt.Errorf("unknown model: %s", name)
+				spec := string(params.ValueId.Value)
+				if _, _, err := a.opts.Cfg.ResolveModelSpec(spec); err != nil {
+					return fmt.Errorf("unknown model: %s (%v)", spec, err)
 				}
-				return st.switchModel(a.opts.Provider, name)
+				return st.switchModel(a.opts.Cfg, spec)
 			case configOptionThinking:
 				name := string(params.ValueId.Value)
 				if !slices.Contains(thinkingEfforts, name) {
@@ -450,15 +457,15 @@ func (a *Agent) SetSessionConfigOption(ctx context.Context, params acpsdk.SetSes
 // model 由调用方决定（新建=初始模型；加载=会话记录的模型，非法时已回退）；
 // cwd 为该会话的工作目录（client 指定或进程 cwd）。
 func (a *Agent) newSessionState(zs *session.Session, model, cwd string) *sessionState {
-	// 构造模型流：测试可经 Options.Streamer 注入 fake；否则按配置构建
+	// 构造模型流：测试可经 Options.Streamer 注入 fake；否则按模型引用构建
 	var streamer llm.Streamer
 	if a.opts.Streamer != nil {
 		streamer = a.opts.Streamer
 	} else {
-		m, err := llm.BuildModelNamed(a.opts.Provider, model)
+		m, err := llm.BuildModelSpec(a.opts.Cfg, model)
 		if err != nil {
-			// 理论上不会发生：model 均来自配置列表；出错时退回第一个模型
-			m, _ = llm.BuildModelNamed(a.opts.Provider, a.opts.Provider.Models[0])
+			// 理论上不会发生：model 均来自配置列表；出错时退回默认模型引用
+			m, _ = llm.BuildModelSpec(a.opts.Cfg, a.opts.ModelName)
 		}
 		streamer = llm.Bind(m)
 	}
@@ -514,10 +521,11 @@ func (a *Agent) openSession(id, cwd string) (*sessionState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %s", id)
 	}
-	// 会话记录的模型若不在当前渠道列表内（配置变更），回退到第一个模型
+	// 会话记录的模型引用可解析则恢复（新格式或旧格式兼容，见
+	// config.RestoreModelSpec；配置变更后可能失效），否则回退默认模型。
 	model := a.opts.ModelName
-	if zs.Model != "" && slices.Contains(a.opts.Provider.Models, zs.Model) {
-		model = zs.Model
+	if spec, err := a.opts.Cfg.RestoreModelSpec(zs.Provider, zs.Model); err == nil {
+		model = spec
 	}
 	st := a.newSessionState(zs, model, cwd)
 	a.sess[st.sid] = st
@@ -566,15 +574,16 @@ func (a *Agent) takeSession(id acpsdk.SessionId) *sessionState {
 	return st
 }
 
-// switchModel 切换会话模型：重建 streamer 并注入 agent（/switch 同语义）。
-func (s *sessionState) switchModel(p *config.Provider, name string) error {
-	m, err := llm.BuildModelNamed(p, name)
+// switchModel 切换会话模型：按模型引用 "provider_name/model_name" 重建
+// streamer 并注入 agent（TUI /switch 同语义）。
+func (s *sessionState) switchModel(cfg *config.Config, spec string) error {
+	m, err := llm.BuildModelSpec(cfg, spec)
 	if err != nil {
 		return err
 	}
 	s.ag.SetStreamer(llm.Bind(m))
-	s.model = name
-	_ = s.zs.AppendMeta("model_change", name) // 落盘留痕；meta 失败不影响切换
+	s.model = spec
+	_ = s.zs.AppendMeta("model_change", spec) // 落盘留痕；meta 失败不影响切换
 	return nil
 }
 
@@ -668,8 +677,8 @@ func modesState(current string) *acpsdk.SessionModeState {
 // mode 选项是 Session Modes 通道（NewSessionResponse.Modes）之外的双通道补充，
 // 顺序追加在末尾（model、thinking 之后），避免影响按索引读取的既有客户端。
 func (a *Agent) configOptions(st *sessionState) []acpsdk.SessionConfigOption {
-	modelOpts := make([]acpsdk.SessionConfigSelectOption, 0, len(a.opts.Provider.Models))
-	for _, m := range a.opts.Provider.Models {
+	modelOpts := make([]acpsdk.SessionConfigSelectOption, 0, len(a.opts.Cfg.Providers))
+	for _, m := range a.opts.Cfg.AllModels() {
 		modelOpts = append(modelOpts, acpsdk.SessionConfigSelectOption{Name: m, Value: acpsdk.SessionConfigValueId(m)})
 	}
 	thinkingOpts := make([]acpsdk.SessionConfigSelectOption, 0, len(thinkingEfforts))

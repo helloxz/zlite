@@ -31,9 +31,9 @@ type options struct {
 // runtime 是一次运行所需的组件集合（run 与引导热重载共用）。
 type runtime struct {
 	cfg       *config.Config
-	p         *config.Provider
+	p         *config.Provider // 默认渠道（默认模型引用解析出的渠道）
 	mode      agent.Mode
-	modelName string
+	modelName string           // 当前模型引用 provider_name/model_name
 	cwd       string
 	mgr       *session.Manager
 	reg       *tools.Registry
@@ -77,7 +77,13 @@ func run(opts options) error {
 // buildRuntime 组装运行期组件（run 与引导热重载共用）。
 // opts.list 时仅构建 mgr/cwd（不创建会话），由调用方打印列表。
 func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, error) {
-	p, err := cfg.DefaultProvider()
+	// 默认模型引用（provider_name/model_name）：agent.default_model 优先，
+	// 缺省取第一个渠道的第一个模型；ResolveModelSpec 校验渠道与模型存在。
+	spec, err := cfg.DefaultModelName()
+	if err != nil {
+		return nil, err
+	}
+	p, _, err := cfg.ResolveModelSpec(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +99,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	}
 
 	// 模型
-	m, err := llm.BuildModel(p)
+	m, err := llm.BuildModelSpec(cfg, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +130,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 		approver = apUI
 	}
 
-	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: p.Models[0], cwd: cwd, mgr: mgr, reg: reg, sk: sk, apUI: apUI}
+	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: spec, cwd: cwd, mgr: mgr, reg: reg, sk: sk, apUI: apUI}
 	if opts.list || opts.acp {
 		return rt, nil // 列表模式不创建会话；ACP 模式会话按 NewSession 请求创建
 	}
@@ -136,7 +142,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 			return nil, fmt.Errorf("当前目录没有可继续的会话（直接运行 zlite 开始新会话）")
 		}
 	} else {
-		sess, err = mgr.Create(cwd, p, string(mode))
+		sess, err = mgr.Create(cwd, p.Name, spec, string(mode))
 	}
 	if err != nil {
 		return nil, err
@@ -146,37 +152,46 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	return rt, nil
 }
 
-// switchModel 切换当前模型（/switch 命令用）：按名重建模型并注入 agent，
-// 更新 modelName，并在会话中留痕。name 须来自配置的模型列表（TUI 已校验）。
-// 调用方须保证 agent 空闲（TUI 在 busy 时拒绝 /switch）。
-func (rt *runtime) switchModel(name string) error {
-	m, err := llm.BuildModelNamed(rt.p, name)
+// switchModel 切换当前模型（/switch 命令用）：按模型引用 "provider_name/model_name"
+// 重建模型并注入 agent，更新 modelName，并在会话中留痕。name 须来自配置的
+// 模型列表（TUI 已校验）。调用方须保证 agent 空闲（TUI 在 busy 时拒绝 /switch）。
+func (rt *runtime) switchModel(spec string) error {
+	m, err := llm.BuildModelSpec(rt.cfg, spec)
 	if err != nil {
 		return err
 	}
 	rt.ag.SetStreamer(llm.Bind(m))
-	rt.modelName = name
-	_ = rt.sess.AppendMeta("model_change", name) // 落盘留痕；meta 失败不影响切换
+	rt.modelName = spec
+	_ = rt.sess.AppendMeta("model_change", spec) // 落盘留痕；meta 失败不影响切换
 	return nil
 }
 
 // switchSession 切换到指定 ID 的会话（/sessions 命令用）：
 // 打开会话文件并替换 agent 的当前会话（旧会话由 SetSession 关闭），
-// 模式同步为会话创建时的模式（状态栏与工具集随之更新）。
-func (rt *runtime) switchSession(id string) error {
+// 模式同步为会话创建时的模式（状态栏与工具集随之更新）；
+// 返回恢复后的模型引用：会话记录的模型可解析则恢复（含旧格式兼容），
+// 否则保持当前模型。
+func (rt *runtime) switchSession(id string) (string, error) {
 	if rt.sess != nil && rt.sess.ID == id {
-		return nil // 已在该会话，无需切换
+		return rt.modelName, nil // 已在该会话，无需切换
 	}
 	sess, err := rt.mgr.Open(rt.cwd, id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	rt.sess = sess
 	rt.ag.SetSession(sess)
 	if m, err := agent.ParseMode(sess.Mode); err == nil {
 		rt.ag.SetMode(m) // 广播 ModeChangeEvent，TUI 状态栏同步
 	}
-	return nil
+	// 恢复会话记录的模型引用（配置变更后可能失效；失败保持当前模型）
+	if spec, err := rt.cfg.RestoreModelSpec(sess.Provider, sess.Model); err == nil && spec != rt.modelName {
+		if m, err := llm.BuildModelSpec(rt.cfg, spec); err == nil {
+			rt.ag.SetStreamer(llm.Bind(m))
+			rt.modelName = spec
+		}
+	}
+	return rt.modelName, nil
 }
 
 // sessionItems 返回最近 20 条会话（/sessions 列表数据源）。
@@ -238,8 +253,7 @@ func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 func runACP(rt *runtime) error {
 	ap := acp.New(acp.Options{
 		Cfg:             rt.cfg,
-		Provider:        rt.p,
-		ModelName:       rt.modelName,
+		ModelName:       rt.modelName, // 默认模型引用 provider_name/model_name
 		Cwd:             rt.cwd,
 		Mgr:             rt.mgr,
 		GlobalSkillsDir: rt.sk.GlobalDir(),
@@ -275,11 +289,11 @@ func runWithSetup(cfgPath string, opts options) error {
 		// 3. 热重载进现有 TUI（不重启进程）
 		t.SetAgent(rt.ag)
 		t.SetModel(rt.modelName)
-		t.SetSwitchModel(rt.p.Models, rt.switchModel)
+		t.SetSwitchModel(rt.cfg.AllModels(), rt.switchModel)
 		t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
 		t.SetSkillsLister(rt.skillItems)
 		t.SetNewSession(func() error {
-			ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
+			ns, err := rt.mgr.Create(rt.cwd, rt.p.Name, rt.modelName, string(agent.ModePlan))
 			if err != nil {
 				return err
 			}
@@ -300,7 +314,7 @@ func startTUI(rt *runtime, opts options) error {
 	// newSession：/new 命令的会话切换回调（创建新会话并切换；defer 的 Close 会
 	// 关闭最终会话，旧会话由 agent.SetSession 关闭，Session.Close 幂等）。
 	newSession := func() error {
-		ns, err := rt.mgr.Create(rt.cwd, rt.p, string(agent.ModePlan))
+		ns, err := rt.mgr.Create(rt.cwd, rt.p.Name, rt.modelName, string(agent.ModePlan))
 		if err != nil {
 			return err
 		}
@@ -309,7 +323,7 @@ func startTUI(rt *runtime, opts options) error {
 		return nil
 	}
 	t := tui.New(rt.cfg, rt.ag, rt.modelName, rt.cwd, newSession)
-	t.SetSwitchModel(rt.p.Models, rt.switchModel)
+	t.SetSwitchModel(rt.cfg.AllModels(), rt.switchModel)
 	t.SetSessionSwitcher(rt.sessionItems, rt.switchSession)
 	t.SetSkillsLister(rt.skillItems)
 	if rt.apUI != nil {
@@ -335,11 +349,11 @@ func listSessions(mgr *session.Manager, cwd string) error {
 		fmt.Println("当前目录没有会话记录")
 		return nil
 	}
-	fmt.Printf("%-19s  %-6s  %-12s  %-22s  %s\n", "ID", "MODE", "MODEL", "TITLE", "消息数")
+	fmt.Printf("%-19s  %-6s  %-24s  %-22s  %s\n", "ID", "MODE", "MODEL", "TITLE", "消息数")
 	for _, info := range infos {
 		model := info.Model
-		if len(model) > 12 {
-			model = model[:12]
+		if len(model) > 24 { // 模型引用 provider_name/model_name 可能较长，截断展示
+			model = model[:24]
 		}
 		title := info.Title
 		if title == "" {
@@ -348,7 +362,7 @@ func listSessions(mgr *session.Manager, cwd string) error {
 		if tr := []rune(title); len(tr) > 20 {
 			title = string(tr[:20]) + "…"
 		}
-		fmt.Printf("%-19s  %-6s  %-12s  %-22s  %d\n", info.ID, info.Mode, model, title, info.Messages)
+		fmt.Printf("%-19s  %-6s  %-24s  %-22s  %d\n", info.ID, info.Mode, model, title, info.Messages)
 	}
 	return nil
 }
