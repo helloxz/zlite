@@ -536,35 +536,88 @@ func displayWidth(s string) int {
 }
 
 // truncateDisplay 按显示宽度截断 s（超出部分以省略号结尾）。
+// ANSI SGR 序列完整保留且不计宽（窄屏截断状态栏等含色文本时不会切坏序列）。
 func truncateDisplay(s string, w int) string {
+	runes := []rune(s)
 	width := 0
-	for i, r := range []rune(s) {
+	for i := 0; i < len(runes); {
+		r := runes[i]
+		if r == '\x1b' {
+			// 跳过 ANSI 序列（CSI：ESC [ ... 字母；孤立 ESC 也跳过），不计宽
+			if i+1 < len(runes) && runes[i+1] == '[' {
+				i += 2
+				for i < len(runes) {
+					c := runes[i]
+					i++
+					if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '@' {
+						break
+					}
+				}
+				continue
+			}
+			i++
+			continue
+		}
 		rw := 1
 		if r > 0x2E7F { // CJK 部首区起视为宽字符（含中文、全角标点、假名）
 			rw = 2
 		}
 		if width+rw > w {
-			return string([]rune(s)[:i]) + "…"
+			return string(runes[:i]) + "…"
 		}
 		width += rw
+		i++
 	}
 	return s
 }
 
-const helpText = `Available commands:
-  /init     Analyze the project and generate/refresh AGENTS.md
-  /new      Start a new session (Ctrl+N; mode resets to plan)
-  /plan     Switch to plan mode (read-only: inspect and search only)
-  /build    Switch to build mode (writable: modify files, run commands)
-  /switch   Switch model (Shift+Tab, pick from the list, or /switch <model>)
-  /thinking Switch thinking effort (Ctrl+T, pick from the list, or /thinking <effort>; auto = let the API decide)
-  /sessions Switch to a recent session (Ctrl+L)
-  /skills   List discovered skills (global + project)
-  /exit     Quit zlite
-  /help     Show this help
+// commandInfo 是斜杠命令的注册信息：/ 输入提示浮层与 /help 共用同一
+// 数据源（避免列表漂移）。
+type commandInfo struct {
+	name string
+	desc string
+}
 
-Usage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.
-Scroll chat history with PgUp/PgDn (page) or Home/End (top/bottom). Mouse selection is left to the terminal.`
+// commandInfos 是全部可用命令。注意 /exit 与 /quit 同义（都退出）。
+var commandInfos = []commandInfo{
+	{"/init", "Analyze the project and generate/refresh AGENTS.md"},
+	{"/new", "Start a new session (Ctrl+N; mode resets to plan)"},
+	{"/plan", "Switch to plan mode (read-only: inspect and search only)"},
+	{"/build", "Switch to build mode (writable: modify files, run commands)"},
+	{"/switch", "Switch model (Shift+Tab, pick from the list, or /switch <model>)"},
+	{"/thinking", "Switch thinking effort (Ctrl+T, pick from the list, or /thinking <effort>; auto = let the API decide)"},
+	{"/sessions", "Switch to a recent session (Ctrl+L)"},
+	{"/skills", "List discovered skills (global + project)"},
+	{"/exit", "Quit zlite"},
+	{"/help", "Show this help"},
+}
+
+// hintNameWidth 是 / 提示浮层中命令名的固定列宽（最长命令名 + 2 空格分隔），
+// 保证所有命令的描述从同一列开始。
+func hintNameWidth() int {
+	w := 0
+	for _, c := range commandInfos {
+		if l := displayWidth(c.name); l > w {
+			w = l
+		}
+	}
+	return w + 2
+}
+
+// buildHelpText 从 commandInfos 生成 /help 文本（与 / 提示浮层同源）。
+func buildHelpText() string {
+	var b strings.Builder
+	b.WriteString("Available commands:\n")
+	for _, c := range commandInfos {
+		b.WriteString("  " + c.name + "  " + c.desc + "\n")
+	}
+	b.WriteString("\nUsage: type a message and press Enter to send; Tab toggles plan/build mode; Ctrl+C to quit.\n")
+	b.WriteString("Scroll chat history with PgUp/PgDn (page) or Home/End (top/bottom). Mouse selection is left to the terminal.")
+	return b.String()
+}
+
+// helpText 是 /help 命令的输出（惰性生成，与 commandInfos 保持一致）。
+var helpText = buildHelpText()
 
 // ---- 首次配置引导（setup state machine）----
 

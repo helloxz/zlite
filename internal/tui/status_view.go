@@ -63,9 +63,18 @@ func (s *statusView) title(w int) string {
 	if s.busy {
 		busy = " | *busy*"
 	}
+	// 模式着色：plan 绿色 / build 红色（视觉区分；颜色序列不计宽，
+	// displayWidth 会剥 ANSI，窄屏截断走 truncateDisplay 的 ANSI 感知路径）。
+	modeStr := string(s.mode)
+	switch s.mode {
+	case agent.ModePlan:
+		modeStr = colorize(modeStr, ansiBlue) // plan 标准蓝（build 保持红）
+	case agent.ModeBuild:
+		modeStr = colorize(modeStr, ansiRed)
+	}
 	model := truncateDisplay(s.model, 28)
 	left := fmt.Sprintf(" [%s] %s | thinking: %s | /help for commands%s ",
-		string(s.mode), model, s.thinking, busy)
+		modeStr, model, s.thinking, busy)
 	leftW := displayWidth(left)
 
 	pathText := s.cwd

@@ -10,6 +10,7 @@ import (
 const (
 	ansiReset    = "\x1b[0m"
 	ansiGreen    = "\x1b[32m"                     // 代码块 / [ok]
+	ansiBlue     = "\x1b[34m"                     // plan 模式（标准蓝）
 	ansiYellow   = "\x1b[33m"                     // 工具参数 / 状态强调
 	ansiRed      = "\x1b[31m"                     // 错误
 	ansiDim      = "\x1b[2m"                      // 系统提示

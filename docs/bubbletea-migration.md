@@ -3,6 +3,34 @@
 > 状态：**M0-M4 全部完成，迁移交付**。后续 UI 优化记录见 §0.9-§0.10。
 > 目标版本：bubbletea v1.3.10 + lipgloss v1.1.0 + bubbles **v1.0.0**（textarea/viewport）。
 
+## 0.13 状态栏模式着色（2026-08-14）
+
+状态栏 mode 显示按模式着色：**plan 绿色（32）/ build 红色（31）**，
+Tab 切换即时生效（`ModeChangeEvent` 驱动）。
+
+- `status_view.title()` 对 mode 文本 `colorize`（颜色序列不计宽，
+  `displayWidth` 剥 ANSI 计算填充）；
+- `truncateDisplay` 升级为 **ANSI 感知**：CSI 序列完整保留且不计宽
+  （窄屏截断含色文本时不会切坏序列）；
+- 测试：`TestModeColors`（plan 绿 / build 红 / 窄屏不破坏序列）；
+  既有断言 `[plan] m2` 类改用 `stripANSI` 匹配。
+
+## 0.12 / 命令提示浮层（2026-08-14）
+
+输入框以 `/` 开头时，在聊天区底部（状态栏上方）浮出命令提示（灰色，
+**每行一个命令 + 描述**，非模态：不拦截输入、不改变布局行数），随输入
+按前缀过滤：
+
+- `/` → 全部命令逐行展示（含描述）；`/sw` → 只剩 `/switch` 一行；非 `/`
+  开头或无匹配 → 隐藏；Backspace 清掉 `/` 后消失；弹窗打开时模态优先
+  不显示；描述超宽截断保留省略号；覆盖行数取命令数与聊天区行数较小值；
+- 命令信息收敛为 `commandInfos` 表（`tui.go`），`/help` 文本与提示浮层
+  同源生成（消除列表漂移）；命令名区域固定宽度（`hintNameWidth` = 最长
+  命令名 + 2 空格），描述列对齐；
+- 实现：`commandHint()`（过滤，返回 `[]string`）+ `overlayHint()`（逐行
+  整行替换聊天区底部，行首无 ANSI 安全），纯渲染层，不侵入键盘逻辑；
+- 测试：`TestCommandHint`（触发/过滤/隐藏/弹窗优先）；tmux 实测全链路。
+
 ## 0.11 UI 优化三（2026-08-14，用户反馈两项）
 
 1. **输入区恢复 2 行可视**（问题 2，已修复）：`SetHeight(2)` 恢复（此前
@@ -10,6 +38,14 @@
    视觉只剩 1 行）；`inputAreaView` 做行交换：内容不足 2 行时把内容行
    交换到输出末尾（空行在上）。textarea wrap 宽度 = `width - padding(2)
    - prompt(2)`，超长内容正常换行（cache 键含宽度，无缓存问题）。
+   - **2026-08-14 复查修复**：a) 行交换条件
+     `TrimSpace(lines[1]) == ""` 是死代码——ta 输出行带 padding+prompt
+     `" │ "`，TrimSpace 永远非空；改为 `isEmptyPromptLine`（去 padding/
+     prompt 后判空），placeholder 与单行内容现在正确落在输入区第 2 行
+     （输出末尾，IME 光标跟随）。b) viewport 高度 H-6 → **H-5**：状态栏
+     3 + 输入区 2 = 5 行，H-6 时 View 总行数 = H-1，屏幕底部留白 1 行。
+     `TestResize` 断言同步（24→25、18→19）。c) 本地测试确认超长内容
+     （60 汉字 = 120 列 > 107 内容宽）wrap 为 2 行、内容末尾在最后一行。
 2. **IME 拼音跟随光标**（问题 1，框架限制，用户决策接受现状）：
    - 根因：bubbletea alt screen 渲染器每帧把终端硬件光标强制定位到
      View **最后一行行首**（`standard_renderer.flush` 末尾

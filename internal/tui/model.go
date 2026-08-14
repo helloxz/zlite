@@ -56,7 +56,7 @@ type model struct {
 
 func newModel(t *TUI) model {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter=send, Shift+Enter=newline, Tab=mode, Ctrl+C=quit)"
+	ta.Placeholder = "Type a message... (Enter=send, Tab=mode, Ctrl+C=quit)"
 	ta.ShowLineNumbers = false
 	// 每行蓝色竖线前缀（与圆角边框风格统一；Prompt 必须早于 SetWidth 设置，
 	// handleResize 中调用——顺序天然满足）。
@@ -164,12 +164,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleResize 响应窗口尺寸变化：聊天区占主体，底部状态栏（3 行边框盒）
-// + 输入区（2 行，无 Prompt 前缀），留 1 行余量避免总行数超出屏幕被终端
-// 截断（M0 实测）；输入区改为 2 行后聊天区相应 +1 行（H-6）。
+// + 输入区（2 行）。行数必须精确等于屏幕高，否则底部留白：
+// viewport(H-5) + 状态栏 3 + 输入区 2 = H。
 func (m model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width, m.height = msg.Width, msg.Height
 	m.t.screenH = msg.Height // 弹窗布局用
-	v := viewport.New(msg.Width, msg.Height-6)
+	v := viewport.New(msg.Width, msg.Height-5)
 	m.vp = &v
 	m.ta.SetWidth(msg.Width) // 全宽背景；内容宽由 textarea 按 padding/prompt 自动折算
 	m.ta.SetHeight(2)        // 2 行可视：内容换行可见（inputAreaView 做行交换）
@@ -362,6 +362,9 @@ func (m model) View() string {
 	chatStr := m.vp.View()
 	if m.t.pickerOpen() {
 		chatStr = m.overlayChat(chatStr)
+	} else if hints := m.commandHint(); len(hints) > 0 {
+		// 输入 / 开头的命令提示浮层（非模态，覆盖聊天区底部多行）
+		chatStr = m.overlayHint(chatStr, hints)
 	}
 	b.WriteString(chatStr)
 	b.WriteString("\n")
@@ -387,14 +390,69 @@ func (m model) View() string {
 func (m model) inputAreaView() string {
 	v := strings.TrimSuffix(m.ta.View(), "\n")
 	lines := strings.Split(v, "\n")
-	if len(lines) == 2 && strings.TrimSpace(lines[1]) == "" {
-		// 内容 1 行：空行在上、内容行在下（内容行位于输出末尾）
+	// 内容不足 2 行（单行内容/placeholder）时：空行在上、内容行在下。
+	// 内容行必须在 View 输出末尾——终端硬件光标（=IME 拼音位置）由渲染器
+	// 停在最后一行，与 textarea 虚拟光标一致（M0/M1 已验证）。
+	// 注意：不能用 TrimSpace 判空——ta 输出行带 prompt "│ "，永远非空。
+	if len(lines) == 2 && isEmptyPromptLine(lines[1]) {
 		lines[0], lines[1] = lines[1], lines[0]
 	}
 	return strings.Join(lines, "\n")
 }
 
-// overlayChat 把弹窗盒子插入聊天区中央。
+// isEmptyPromptLine 判断 textarea 输出行是否仅含 padding/prompt/空白（无内容）。
+func isEmptyPromptLine(s string) bool {
+	s = strings.TrimSpace(s)        // 去首尾 padding/pad
+	s = strings.TrimPrefix(s, "│ ") // 去 prompt（含尾随空格）
+	s = strings.TrimPrefix(s, "│")  // 容错：无尾随空格的 prompt
+	return strings.TrimSpace(s) == ""
+}
+
+// commandHint 返回输入框以 / 开头时的命令提示（每行一个命令 + 描述，
+// 按前缀过滤；非 / 开头、无匹配或弹窗打开时返回 nil）。多行输入只取
+// 首行参与匹配。
+func (m model) commandHint() []string {
+	val := m.ta.Value()
+	if i := strings.IndexByte(val, '\n'); i >= 0 {
+		val = val[:i]
+	}
+	if !strings.HasPrefix(val, "/") {
+		return nil
+	}
+	var out []string
+	nameW := hintNameWidth()
+	for _, c := range commandInfos {
+		if strings.HasPrefix(c.name, val) {
+			out = append(out, padDisplay(c.name, nameW)+c.desc)
+		}
+	}
+	return out
+}
+
+// overlayHint 把命令提示逐行覆盖到聊天区底部（每行一个命令 + 描述，
+// 灰色；不改变布局行数，聊天区内容只是被遮挡，滚动后仍可见）。
+// 覆盖行数取命令数与聊天区行数的较小值（从底部向上）。
+// 行首无 ANSI 时整行替换安全（被替换行整体丢弃，不破坏行内序列）。
+func (m model) overlayHint(chat string, hints []string) string {
+	chat = strings.TrimSuffix(chat, "\n")
+	lines := strings.Split(chat, "\n")
+	if len(lines) == 0 {
+		return chat
+	}
+	n := len(hints)
+	if n > len(lines) {
+		n = len(lines)
+	}
+	start := len(lines) - n
+	for i := 0; i < n; i++ {
+		line := ansiPathGray + truncateDisplay(hints[i], m.width-1) + ansiReset
+		if dw := displayWidth(line); dw < m.width {
+			line += strings.Repeat(" ", m.width-dw)
+		}
+		lines[start+i] = line
+	}
+	return strings.Join(lines, "\n")
+}
 // 按行切分拼接（不触碰行内 ANSI 序列），总行数保持不变（H-7），
 // 避免超出屏幕高度被终端滚动截断（M0 实测约束）。
 func (m model) overlayChat(chat string) string {
