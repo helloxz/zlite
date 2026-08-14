@@ -35,12 +35,7 @@ bin/zlite --version
 
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
-
-[tui]
-  theme = "dark"
-
-[session]
-  keep = 20
+  plan_extra_commands = []       # plan 模式额外放行命令（与内置只读白名单合并去重）
 ```
 
 ## 功能规划

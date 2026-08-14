@@ -43,15 +43,16 @@ type Registry struct {
 }
 
 // New 创建注册表并注册内置工具。
-// cwd 是工具执行的基准目录；confirmCommands 是 build 模式下需要确认的危险命令清单。
-func New(cwd string, confirmCommands []string) *Registry {
+// cwd 是工具执行的基准目录；confirmCommands 是 build 模式下需要确认的危险命令清单；
+// planExtraCommands 是用户追加到 plan 模式只读白名单的命令名（与内置合并、去重）。
+func New(cwd string, confirmCommands, planExtraCommands []string) *Registry {
 	r := &Registry{cwd: cwd, confirm: confirmCommands}
 	r.register(readFileTool(cwd))
 	r.register(grepTool(cwd))
 	r.register(globTool(cwd))
 	r.register(webFetchTool())
 	r.register(webSearchTool())
-	r.register(runCommandPlanTool(cwd))
+	r.register(runCommandPlanTool(cwd, planExtraCommands))
 	r.register(runCommandBuildTool(cwd, confirmCommands))
 	r.register(writeFileTool(cwd))
 	r.register(editFileTool(cwd))

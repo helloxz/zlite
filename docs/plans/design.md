@@ -20,12 +20,6 @@
 
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
-
-[tui]
-  theme = "dark"                 # 预留主题
-
-[session]
-  keep = 20                      # 会话列表保留数
 ```
 
 ### 1.1 config 包接口
@@ -35,8 +29,6 @@ type Config struct {
     Providers []Provider `mapstructure:"providers"`
     Agent     AgentCfg   `mapstructure:"agent"`
     Shell     ShellCfg   `mapstructure:"shell"`
-    TUI       TUISet     `mapstructure:"tui"`
-    Session   SessionCfg `mapstructure:"session"`
 }
 type Provider struct {
     Name    string `mapstructure:"name"`
@@ -51,7 +43,7 @@ func (c *Config) DefaultProvider() (*Provider, error)  // 一期: 取 providers[
 ```
 
 - ENV 展开：`api_key` 等字段若为 `${VAR}` 形式，从环境变量取值；变量未设置则报错提示
-- 默认值：`agent.mode=plan`、`agent.auto_approve=false`、`agent.max_steps=16`、`session.keep=20`
+- 默认值：`agent.mode=plan`、`agent.auto_approve=false`、`agent.max_steps=16`
 - 支持命令行覆盖：`-m build` 优先于配置文件
 
 ## 2. 会话 jsonl 格式

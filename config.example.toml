@@ -1,0 +1,94 @@
+# =============================================================================
+# zlite 配置文件示例（完整版）
+# -----------------------------------------------------------------------------
+# 本文件展示 zlite 支持的全部配置项，供参考与复制。
+# 实际配置文件默认位于 ~/.zlite/config.toml，使用时复制并按需修改：
+#   cp config.example.toml ~/.zlite/config.toml
+# 修改后需重启 zlite 生效；首次运行（或配置不完整）时 zlite 也会在
+# TUI 界面内引导配置。
+#
+# 约定：
+#   - 标注（必填）的项必须提供；其余均为可选（可选，缺省用内置默认值）。
+#   - 模型以 "provider_name/model_name"（渠道名/模型名）引用。
+#   - api_key 支持 ${ENV} 形式引用环境变量；密钥建议写入
+#     ~/.zlite/.env（与 config.toml 同目录），避免密钥明文落盘。
+# =============================================================================
+
+# ============================ 模型渠道（providers）============================
+# [[providers]] 是数组段，可配置多个渠道（复制整段追加即可）。
+# 模型引用示例：default/gpt-4o、claude/claude-sonnet-4-20250514。
+
+[[providers]]
+  # （必填）渠道名：唯一、不能包含 "/"；作为模型引用 "渠道名/模型名" 的前缀。
+  name = "default"
+
+  # （可选）厂商.协议，缺省 "openai.chat"：
+  #   openai.chat      OpenAI Chat Completions（默认，兼容一切自定义端点/自建网关）
+  #   openai.responses OpenAI Responses API（要求端点支持 /responses）
+  #   anthropic        Anthropic Messages API（/v1/messages）
+  type = "openai.chat"
+
+  # （必填）自定义端点根地址（不含路径后缀，协议由 type 决定）。
+  #   例如 OpenAI 官方：https://api.openai.com/v1
+  #        Anthropic 官方：https://api.anthropic.com
+  #        自建网关/兼容服务：https://your-gateway.example.com/v1
+  base_url = "https://api.example.com/v1"
+
+  # （必填）API 密钥。
+  # 支持 ${ENV} 展开（整串引用，不支持拼接），变量可来自 ~/.zlite/.env
+  # 或 shell 环境（shell 中 export 的变量优先于 .env）。
+  # 推荐写到 ~/.zlite/.env：
+  #   ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
+  # 也可直接填明文（不推荐：密钥会落盘到配置文件）。
+  # 注意：未配置 api_key 的渠道视为未配置，启动时会进入首次引导。
+  api_key = "${ZLITE_DEFAULT_API_KEY}"
+
+  # （必填）模型列表：至少填一个，可多个（TUI 中 /switch 切换用）。
+  # 模型名可含 "/"（如 deepseek-ai/deepseek-chat），引用时渠道名取第一个 "/" 之前。
+  models = ["gpt-4o", "gpt-4o-mini"]
+
+# 追加第二个渠道的示例（可选；用不到可删除整段）。
+[[providers]]
+  name = "claude"
+  type = "anthropic"                    # 原生 Anthropic Messages API
+  base_url = "https://api.anthropic.com"
+  api_key = "${ANTHROPIC_API_KEY}"      # 需在 ~/.zlite/.env 中设置 ANTHROPIC_API_KEY=sk-ant-...
+  models = ["claude-sonnet-4-20250514"]
+
+# ============================== agent 行为 ==============================
+# 本节全部可选；不写则使用默认值。
+
+[agent]
+  # （可选）工作模式：plan（只读，仅阅读/搜索）| build（可写，改文件/执行命令）。
+  # 默认 "plan"。运行中可用 Tab 或 /plan、/build 切换。
+  mode = "plan"
+
+  # （可选）默认模型引用 "provider_name/model_name"；缺省取第一个渠道的第一个模型。
+  # 引用的渠道与模型必须已在 [[providers]] 中配置，否则启动即报错。
+  default_model = "default/gpt-4o"
+
+  # （可选）信任模式：true = 跳过危险命令确认（谨慎开启）。
+  # 默认 false。
+  auto_approve = false
+
+  # （可选）单轮回答中工具调用循环的上限（防止模型无限循环）。默认 16。
+  max_steps = 16
+
+  # （可选）自动加载项目根目录 AGENTS.md 并注入系统提示词。默认 true。
+  load_agents_md = true
+
+# ============================ shell 工具 ============================
+# 本节可选。
+
+[shell]
+  # （可选）build 模式下执行这些命令前缀时需要人工确认（危险命令清单）。
+  # 默认值如下，可按需增删（例如去掉 "git"，或追加 "docker"）。
+  confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
+
+  # （可选）追加到 plan 模式只读命令白名单的命令名（与内置白名单合并、去重）。
+  # 例如放行 python3/kubectl 供 plan 模式只读调用；默认空（仅内置白名单）。
+  # 注意：
+  #   - 仅放行命令名，shell 元字符（> ; & | $ 反引号 等）与 git 写子命令仍被禁止；
+  #   - 放行带写副作用参数的命令需谨慎：如 curl -o file 可写文件、curl -d @file 会上传
+  #     本地文件内容、curl 可访问内网地址（localhost/云元数据），放行后由用户自担风险。
+  plan_extra_commands = []

@@ -35,23 +35,19 @@ const (
 
 // 默认值。
 const (
-	defaultMode        = ModePlan
-	defaultMaxSteps    = 16
-	defaultSessionKeep = 20
-	defaultTheme       = "dark"
-	defaultType        = TypeOpenAIChat
+	defaultMode     = ModePlan
+	defaultMaxSteps = 16
+	defaultType     = TypeOpenAIChat
 )
 
 // defaultConfirmCommands 是危险命令确认清单（决策 D4）。
-var defaultConfirmCommands = []string{"rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"}
+var defaultConfirmCommands = []string{"rm", "mv", "dd", "mkfs", "sudo", "chmod"}
 
 // Config 是完整配置。
 type Config struct {
 	Providers []Provider `mapstructure:"providers"`
 	Agent     AgentCfg   `mapstructure:"agent"`
 	Shell     ShellCfg   `mapstructure:"shell"`
-	TUI       TUISet     `mapstructure:"tui"`
-	Session   SessionCfg `mapstructure:"session"`
 }
 
 // Provider 描述一个模型渠道。
@@ -79,17 +75,11 @@ type AgentCfg struct {
 
 // ShellCfg 是 shell 工具配置。
 type ShellCfg struct {
+	// ConfirmCommands 是 build 模式下需要确认的危险命令黑名单。
 	ConfirmCommands []string `mapstructure:"confirm_commands"`
-}
-
-// TUISet 是 TUI 配置（一期仅预留）。
-type TUISet struct {
-	Theme string `mapstructure:"theme"`
-}
-
-// SessionCfg 是会话配置。
-type SessionCfg struct {
-	Keep int `mapstructure:"keep"`
+	// PlanExtraCommands 追加到 plan 模式只读命令白名单的命令名
+	// （与内置白名单合并、去重；如 "python3"、"kubectl"）。默认空。
+	PlanExtraCommands []string `mapstructure:"plan_extra_commands"`
 }
 
 // DefaultConfig 返回带默认值的配置。
@@ -101,9 +91,7 @@ func DefaultConfig() *Config {
 			MaxSteps:     defaultMaxSteps,
 			LoadAgentsMD: true,
 		},
-		Shell:   ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
-		TUI:     TUISet{Theme: defaultTheme},
-		Session: SessionCfg{Keep: defaultSessionKeep},
+		Shell: ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
 	}
 }
 
@@ -268,9 +256,6 @@ func (c *Config) validate() error {
 	}
 	if c.Agent.MaxSteps <= 0 {
 		return fmt.Errorf("agent.max_steps 必须为正整数，当前: %d", c.Agent.MaxSteps)
-	}
-	if c.Session.Keep <= 0 {
-		return fmt.Errorf("session.keep 必须为正整数，当前: %d", c.Session.Keep)
 	}
 	seen := make(map[string]bool, len(c.Providers))
 	for i := range c.Providers {
@@ -472,12 +457,7 @@ func WriteTemplate(path string) error {
 
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
-
-[tui]
-  theme = "dark"
-
-[session]
-  keep = 20
+  plan_extra_commands = []       # plan 模式额外放行命令（与内置只读白名单合并、去重）
 `
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

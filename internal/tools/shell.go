@@ -25,8 +25,33 @@ var readOnlyCommands = map[string]bool{
 	"ls": true, "pwd": true, "cat": true, "head": true, "tail": true,
 	"wc": true, "find": true, "grep": true, "rg": true, "which": true,
 	"ps": true, "pgrep": true, "free": true, "uptime": true, "lsof": true,
+	"ss": true, "netstat": true,
 	"file": true, "stat": true, "du": true, "df": true,
 	"echo": true, "date": true, "whoami": true, "uname": true, "env": true,
+}
+
+// cleanExtraCommands 去除用户额外命令中的空白并忽略空项（与 merge 口径一致）。
+func cleanExtraCommands(extra []string) []string {
+	var out []string
+	for _, c := range extra {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// mergeReadOnlyCommands 合并内置只读白名单与用户额外放行命令（map 天然去重）：
+// 返回新 map，不修改内置 readOnlyCommands。
+func mergeReadOnlyCommands(extra []string) map[string]bool {
+	allowed := make(map[string]bool, len(readOnlyCommands)+len(extra))
+	for name := range readOnlyCommands {
+		allowed[name] = true
+	}
+	for _, c := range cleanExtraCommands(extra) {
+		allowed[c] = true
+	}
+	return allowed
 }
 
 // gitReadOnlySubcommands 是 plan 模式下允许的 git 只读子命令。
@@ -51,15 +76,21 @@ type runCommandInput struct {
 
 // ---- plan 模式：只读白名单版 ----
 
-func runCommandPlanTool(cwd string) Tool {
-	desc := "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/ps/pgrep/free/uptime/lsof/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。" + shellHint()
+func runCommandPlanTool(cwd string, extra []string) Tool {
+	allowed := mergeReadOnlyCommands(extra)
+	desc := "执行 shell 命令。当前处于 plan 模式：仅允许只读命令（ls/pwd/cat/head/tail/wc/find/grep/rg/which/ps/pgrep/free/uptime/lsof/ss/netstat/file/stat/du/df/echo/date/whoami/uname/env 及 git 只读子命令 status/diff/log/show/branch/remote），禁止重定向、管道、分号拼接等。"
+	if extraCmds := cleanExtraCommands(extra); len(extraCmds) > 0 {
+		// 动态追加用户额外放行命令，让模型知道可用（无额外命令时描述与内置一致）
+		desc += " 用户额外放行: " + strings.Join(extraCmds, "/") + "。"
+	}
+	desc += shellHint()
 	return Tool{
 		GoAITool: goai.NewTool("run_command", desc,
 			func(ctx context.Context, in runCommandInput) (string, error) {
 				if in.Command == "" {
 					return "", fmt.Errorf("command 不能为空")
 				}
-				if err := validateReadOnlyCommand(in.Command); err != nil {
+				if err := validateReadOnlyCommand(in.Command, allowed); err != nil {
 					return "", err
 				}
 				return executeShell(ctx, cwd, in.Command, in.TimeoutS)
@@ -192,7 +223,8 @@ func shellBaseName(name string) string {
 }
 
 // validateReadOnlyCommand 校验命令符合 plan 模式只读约束。
-func validateReadOnlyCommand(command string) error {
+// allowed 是合并后的白名单（内置 + 用户额外放行，见 mergeReadOnlyCommands）。
+func validateReadOnlyCommand(command string, allowed map[string]bool) error {
 	if forbiddenShellChars.MatchString(command) {
 		return fmt.Errorf("plan 模式不允许 shell 元字符（> ; & | $ 反引号 换行 等）: %q", command)
 	}
@@ -201,7 +233,7 @@ func validateReadOnlyCommand(command string) error {
 		return fmt.Errorf("空命令")
 	}
 	name := path.Base(fields[0])
-	if readOnlyCommands[name] {
+	if allowed[name] {
 		return nil
 	}
 	if name == "git" {

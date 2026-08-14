@@ -21,7 +21,7 @@
 
 ### T2. config 包
 
-- [ ] `Config` / `Provider` / `AgentCfg` / `ShellCfg` / `TUISet` / `SessionCfg` struct（见 design.md §1.1）
+- [ ] `Config` / `Provider` / `AgentCfg` / `ShellCfg` struct（见 design.md §1.1）
 - [ ] `Load(path)`：viper 读 `~/.zlite/config.toml`（文件不存在时用默认值 + 首次运行提示模板），`${ENV}` 展开，默认值填充
 - [ ] `DefaultProvider()`：取 `providers[0]`，一期仅支持 `type = "openai-compatible"`
 - [ ] 单元测试：默认值、ENV 展开、非法配置报错

@@ -66,16 +66,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 [shell]
   # build 模式下执行这些命令前缀时需要人工确认（默认值）
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
-
-# ============ TUI ============
-
-[tui]
-  theme = "dark"           # 界面主题（一期仅预留）
-
-# ============ 会话 ============
-
-[session]
-  keep = 20                # 会话列表保留的最近会话数（超出的会被清理）
+  plan_extra_commands = [] # plan 模式额外放行命令（与内置只读白名单合并、去重；如 ["python3"]）
 ```
 
 ## 配置项速查表
@@ -93,8 +84,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 | `agent.max_steps` | int | `16` | 工具循环上限 |
 | `agent.load_agents_md` | bool | `true` | 自动加载项目 AGENTS.md |
 | `shell.confirm_commands` | string[] | 见模板 | 需确认的命令前缀 |
-| `tui.theme` | string | `"dark"` | 主题（预留） |
-| `session.keep` | int | `20` | 保留的会话数 |
+| `shell.plan_extra_commands` | string[] | `[]` | plan 模式额外放行命令名（与内置白名单合并去重） |
 
 ## 示例：多渠道 + Anthropic + 默认模型
 
