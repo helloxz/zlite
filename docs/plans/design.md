@@ -10,7 +10,7 @@
   name = "default"
   type = "openai-compatible"     # 预留: openai / anthropic / ollama / ...
   base_url = "https://api.example.com/v1"
-  api_key = "${ZLITE_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
+  api_key = "${ZLITE_DEFAULT_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
   model = "gpt-4o"
 
 [agent]

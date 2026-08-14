@@ -24,7 +24,7 @@ bin/zlite --version
   name = "default"
   type = "openai.chat"            # 厂商.协议: openai.chat | openai.responses
   base_url = "https://api.example.com/v1"
-  api_key = "${ZLITE_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
+  api_key = "${ZLITE_DEFAULT_API_KEY}"   # 支持 ${ENV} 展开，密钥不落盘
   models = ["gpt-4o"]
 
 [agent]

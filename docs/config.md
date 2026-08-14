@@ -14,12 +14,12 @@ zlite 会直接在 TUI 界面引导配置**：依次询问 type、base_url、api
 
 ```bash
 # ~/.zlite/.env
-ZLITE_API_KEY=sk-xxxxxxxxxxxxxxxx
+ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 ```
 
-- `.env` 中的变量通过 `api_key = "${ZLITE_API_KEY}"` 形式引用
+- `.env` 中的变量通过 `api_key = "${ZLITE_DEFAULT_API_KEY}"` 形式引用
 - 已存在的 shell 环境变量优先于 `.env`（godotenv 默认不覆盖），两者可共存
-- 也可完全不写配置文件密钥：shell 里 `export ZLITE_API_KEY=...` 同样生效
+- 也可完全不写配置文件密钥：shell 里 `export ZLITE_DEFAULT_API_KEY=...` 同样生效
 
 ## 完整配置项
 
@@ -38,7 +38,7 @@ ZLITE_API_KEY=sk-xxxxxxxxxxxxxxxx
   base_url = "https://api.example.com/v1"
 
   # 支持 ${ENV} 展开；密钥建议放 ~/.zlite/.env
-  api_key = "${ZLITE_API_KEY}"
+  api_key = "${ZLITE_DEFAULT_API_KEY}"
 
   # 模型列表：可配置多个，默认使用第一个
   models = ["gpt-4o", "gpt-4o-mini"]
@@ -92,7 +92,7 @@ ZLITE_API_KEY=sk-xxxxxxxxxxxxxxxx
   name = "openai-official"
   type = "openai.responses"      # 走 /v1/responses
   base_url = "https://api.openai.com/v1"
-  api_key = "${ZLITE_API_KEY}"
+  api_key = "${ZLITE_DEFAULT_API_KEY}"
   models = ["gpt-4o"]
 ```
 

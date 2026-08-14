@@ -862,7 +862,7 @@ func (t *TUI) handleSetup(msg string) error {
 		}
 		t.setupInput.BaseURL = msg
 		t.setupState = setupAPIKey
-		t.chat.appendSystem("API key (saved to ~/.zlite/.env as ZLITE_API_KEY):")
+		t.chat.appendSystem("API key (saved to ~/.zlite/.env as ZLITE_DEFAULT_API_KEY):")
 	case setupAPIKey:
 		if msg == "" {
 			t.chat.appendSystem("API key cannot be empty. Enter your API key:")

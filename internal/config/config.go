@@ -106,7 +106,7 @@ func DefaultConfig() *Config {
 // Load 读取配置文件。
 //
 // 读取前会先加载同目录下的 .env 文件（不存在则忽略），其中的变量
-// （如 ZLITE_API_KEY）可被 api_key 的 ${VAR} 引用。已存在的环境变量
+// （如 ZLITE_DEFAULT_API_KEY）可被 api_key 的 ${VAR} 引用。已存在的环境变量
 // 优先于 .env（godotenv 默认不覆盖），shell 里 export 与 .env 可共存。
 //
 // 文件不存在时返回 ErrConfigNotFound（上层可调用 WriteTemplate 生成模板后提示用户）。
@@ -209,7 +209,7 @@ var envPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // NeedsSetup 判断是否需要首次引导配置：
 // providers 为空、或第一个 provider 的 name 不是 "default"、或 api_key 为空（展开后）。
-// 注意：api_key = "${ZLITE_API_KEY}" 且 .env 已设置时，展开后非空，视为已配置。
+// 注意：api_key = "${ZLITE_DEFAULT_API_KEY}" 且 .env 已设置时，展开后非空，视为已配置。
 func (c *Config) NeedsSetup() bool {
 	if len(c.Providers) == 0 {
 		return true
@@ -243,10 +243,10 @@ func SplitModels(s string) []string {
 }
 
 // ApplySetup 把引导结果写入磁盘：
-//   - api_key 追加/更新到配置文件同目录的 .env（ZLITE_API_KEY=...，0600），
+//   - api_key 追加/更新到配置文件同目录的 .env（ZLITE_DEFAULT_API_KEY=...，0600），
 //     不覆盖 .env 中已有的其他变量；
 //   - config.toml 只更新 [[providers]] 段（保留 agent/shell/tui/session 等其他段），
-//     api_key 写 ${ZLITE_API_KEY} 占位，密钥不落盘到配置。
+//     api_key 写 ${ZLITE_DEFAULT_API_KEY} 占位，密钥不落盘到配置。
 //
 // 配置文件不存在时（首次运行）直接创建。
 func ApplySetup(path string, in SetupInput) error {
@@ -265,7 +265,7 @@ func ApplySetup(path string, in SetupInput) error {
 		return errors.New("models 不能为空")
 	}
 
-	if err := writeDotEnvKey(filepath.Join(filepath.Dir(path), ".env"), "ZLITE_API_KEY", in.APIKey); err != nil {
+	if err := writeDotEnvKey(filepath.Join(filepath.Dir(path), ".env"), "ZLITE_DEFAULT_API_KEY", in.APIKey); err != nil {
 		return err
 	}
 
@@ -280,7 +280,7 @@ func ApplySetup(path string, in SetupInput) error {
 		"name":     "default",
 		"type":     in.Type,
 		"base_url": in.BaseURL,
-		"api_key":  "${ZLITE_API_KEY}",
+		"api_key":  "${ZLITE_DEFAULT_API_KEY}",
 		"models":   in.Models,
 	}})
 	if err := v.WriteConfigAs(path); err != nil {
@@ -351,7 +351,7 @@ func WriteTemplate(path string) error {
   name = "default"
   type = "openai.chat"           # 厂商.协议：openai.chat | openai.responses
   base_url = "https://api.example.com/v1"
-  api_key = "${ZLITE_API_KEY}"   # 放 ~/.zlite/.env: ZLITE_API_KEY=sk-...
+  api_key = "${ZLITE_DEFAULT_API_KEY}"   # 放 ~/.zlite/.env: ZLITE_DEFAULT_API_KEY=sk-...
   models = ["gpt-4o", "gpt-4o-mini"]   # 可多个，默认使用第一个
 
 [agent]
