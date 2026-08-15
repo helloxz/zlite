@@ -278,18 +278,9 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 			return err
 		}
 	}
-	// 上下文截断（按轮次：超过 defaultMaxHistoryTurns 轮才丢弃最早整轮）
-	all := a.sess.ToMessages()
-	history := truncateMessages(all, defaultMaxHistoryTurns)
-	if countTurns(history) != countTurns(all) {
-		a.sess.AppendMeta("context_truncated", truncationNote(countTurns(all), countTurns(history)))
-	}
-	// 压缩摘要头部注入：summary 存于 meta（不在 History），故必须在截断之后
-	// 前置——不参与轮次统计（countTurns 只数 History 的 user 消息），
-	// 也不会被截断切掉（截断起点始终在其之后的对话消息中）。
-	if a.sess.SummarySet && a.sess.Summary != "" {
-		history = append([]llm.Message{{Role: llm.RoleUser, Content: summaryPrefix + a.sess.Summary}}, history...)
-	}
+	// 上下文截断 + 压缩摘要头部注入（截断按轮次：超过
+	// defaultMaxHistoryTurns 轮才丢弃最早整轮）
+	history := a.buildHistory(true)
 
 	// 组装请求
 	toolList := a.registry.ForMode(tools.Mode(a.mode))
@@ -314,15 +305,77 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 		return fmt.Errorf("模型调用失败: %w", err)
 	}
 
-	// 消费流
+	// 消费流（工具调用/结果/文本/思考实时广播与落盘）
+	fullText, fullReasoning, usage, stepsExhausted, err := a.consumeStream(stream)
+	if err != nil {
+		return err
+	}
+
+	// 工具循环步数耗尽（模型仍想继续调用工具但已达 MaxSteps 上限）：
+	// goai 按正常结束返回，若不处理用户会看到"无输出直接停止"。
+	// 自动发起一轮无工具收尾生成，让模型基于已有工具结果输出总结。
+	if stepsExhausted {
+		a.emit(SystemNoticeEvent{Text: fmt.Sprintf("Tool-call limit (%d) reached while the model still needed more steps. Requesting a summary of progress.", a.cfg.Agent.MaxSteps)})
+		fText, fReasoning, fUsage, fErr := a.finalizeTurn(ctx)
+		// 收尾请求的 token 消耗无论成败都计入用量（状态栏展示真实消耗）
+		usage.InputTokens += fUsage.InputTokens
+		usage.OutputTokens += fUsage.OutputTokens
+		usage.TotalTokens += fUsage.TotalTokens
+		if fErr != nil || strings.TrimSpace(fText) == "" {
+			// 用户主动取消（Esc）：与主流程一致以 ctx 错误结束，
+			// 不落占位文本（占位说明会让用户误以为异常中断）。
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// 其余失败/为空：落盘占位说明（会话历史完整可恢复），
+			// 不向上抛错——主循环的工具执行已完成，报错无助于用户。
+			// 主循环与收尾已流式输出的文本、思考内容均保留（拼接而非
+			// 替换），保证 UI 已展示的内容与落盘历史一致。
+			if fErr != nil {
+				a.emit(SystemNoticeEvent{Text: "The follow-up summary also failed: " + fErr.Error()})
+			}
+			fullText = joinTurnText(joinTurnText(fullText, fText), exhaustedPlaceholder(a.cfg.Agent.MaxSteps))
+			if fReasoning != "" {
+				if fullReasoning != "" {
+					fullReasoning += "\n"
+				}
+				fullReasoning += fReasoning
+			}
+		} else {
+			// 收尾总结追加到主循环已输出的部分文本之后（主循环最后一步
+			// 通常无文本，但更早步骤可能已输出过程性内容，不应丢弃，
+			// 否则 UI 已展示的内容与落盘历史不一致）；思考内容同理保留。
+			fullText = joinTurnText(fullText, fText)
+			if fReasoning != "" {
+				if fullReasoning != "" {
+					fullReasoning += "\n"
+				}
+				fullReasoning += fReasoning
+			}
+		}
+	}
+
+	a.emit(TextDoneEvent{FullText: fullText})
+	if err := a.sess.AppendAssistant(fullText, fullReasoning, &usage); err != nil {
+		return fmt.Errorf("保存助手回复失败: %w", err)
+	}
+	a.emit(DoneEvent{Usage: usage})
+	return nil
+}
+
+// consumeStream 消费生成流并广播事件（runOnce 与 finalizeTurn 共用）：
+// 文本/思考增量实时广播，工具调用/结果记录会话；返回完整文本、思考、
+// token 用量与是否因 MaxSteps 上限被截断（StepsExhausted）。
+func (a *Agent) consumeStream(stream llm.Stream) (text, reasoning string, usage llm.Usage, stepsExhausted bool, err error) {
 	var fullText strings.Builder
 	var fullReasoning strings.Builder
-	var usage llm.Usage
 	thinkingStarted := false // 已广播 ThinkingStartEvent（仅首个 reasoning 增量触发一次）
 	for ch := range stream.Chunks() {
 		switch {
 		case ch.Err != nil:
-			return ch.Err
+			// 出错也返回已累积的文本/思考：上层（如收尾失败兜底）可能
+			// 需要保留 UI 已流式展示的内容（主循环错误路径不落盘，忽略即可）。
+			return fullText.String(), fullReasoning.String(), usage, false, ch.Err
 		case ch.Reasoning != "":
 			// 思考增量：首个触发 ThinkingStartEvent（UI 切换 [thinking...]），
 			// 每个增量广播 ReasoningDeltaEvent（ACP 层转 agent_thought_chunk），
@@ -340,18 +393,38 @@ func (a *Agent) runOnce(ctx context.Context, system string) error {
 			a.onToolCall(*ch.ToolCall)
 		case ch.Finish:
 			usage = ch.Usage
+			stepsExhausted = ch.StepsExhausted
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return err
+		return fullText.String(), fullReasoning.String(), usage, false, err
 	}
+	return fullText.String(), fullReasoning.String(), usage, stepsExhausted, nil
+}
 
-	a.emit(TextDoneEvent{FullText: fullText.String()})
-	if err := a.sess.AppendAssistant(fullText.String(), fullReasoning.String(), &usage); err != nil {
-		return fmt.Errorf("保存助手回复失败: %w", err)
+// finalizeTurn 发起一轮无工具收尾生成（工具步数耗尽后调用）：
+// 基于会话中已执行的完整工具结果（实时 ToMessages），让模型输出最终
+// 总结/现状说明；文本经 consumeStream 流式广播，作为本次回复落盘。
+func (a *Agent) finalizeTurn(ctx context.Context) (text, reasoning string, usage llm.Usage, err error) {
+	// 锁内取当前模型流：/switch 可并发替换（与 runOnce 一致）
+	a.mu.Lock()
+	streamer := a.streamer
+	a.mu.Unlock()
+
+	stream, err := streamer.StreamText(ctx, llm.StreamRequest{
+		System: finalizeSystemPrompt,
+		// 与主循环同一视图：按轮次截断 + 压缩摘要头部注入，
+		// 长会话下避免收尾请求上下文爆炸或与主循环历史不一致。
+		// noteTruncation=false：截断记录由主循环写过，不重复写 meta。
+		Messages:        a.buildHistory(false),
+		MaxSteps:        1, // 无工具注册，单步文本生成
+		ReasoningEffort: a.thinking,
+	})
+	if err != nil {
+		return "", "", usage, fmt.Errorf("模型调用失败: %w", err)
 	}
-	a.emit(DoneEvent{Usage: usage})
-	return nil
+	text, reasoning, usage, _, err = a.consumeStream(stream)
+	return text, reasoning, usage, err
 }
 
 // onToolCall 处理模型请求的工具调用：记录会话 + 广播事件。

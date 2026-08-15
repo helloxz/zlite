@@ -65,6 +65,11 @@ type Chunk struct {
 	ToolCall *ToolCall
 	// Finish 表示流结束（此时 Usage 有效）。
 	Finish bool
+	// StepsExhausted 表示工具循环因达到 MaxSteps 上限被截断
+	// （模型仍想继续调用工具，Finish 时有效）。
+	// 非错误路径：goai 以正常结束返回（StoppedBy=StopCauseMaxSteps），
+	// 上层须据此区分"模型自然完成"与"循环被截断"。
+	StepsExhausted bool
 	// Usage 是整轮生成的总 token 用量（Finish 时有效）。
 	Usage Usage
 	// Err 是流错误（非 nil 时流终止）。
@@ -325,11 +330,15 @@ func (s *goaiStream) Chunks() <-chan Chunk {
 				}}
 			case provider.ChunkFinish:
 				u := ch.Usage
-				out <- Chunk{Finish: true, Usage: Usage{
-					InputTokens:  u.InputTokens,
-					OutputTokens: u.OutputTokens,
-					TotalTokens:  u.TotalTokens,
-				}}
+				out <- Chunk{
+					Finish:         true,
+					StepsExhausted: ch.StoppedBy == provider.StopCauseMaxSteps,
+					Usage: Usage{
+						InputTokens:  u.InputTokens,
+						OutputTokens: u.OutputTokens,
+						TotalTokens:  u.TotalTokens,
+					},
+				}
 			case provider.ChunkError:
 				out <- Chunk{Err: ch.Error}
 			}
