@@ -201,7 +201,7 @@ func (m model) refreshChat() {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	t := m.t
 
-	// 确认弹窗打开时是模态：←/→ 循环选择，Enter 确认，Esc = Cancel。
+	// 确认弹窗打开时是模态：←/→ 循环选择，Enter 确认，Esc = Deny。
 	if t.confirm != nil {
 		switch msg.String() {
 		case keyQuit:

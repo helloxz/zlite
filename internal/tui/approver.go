@@ -8,7 +8,7 @@ import (
 )
 
 // Approver 是 build 模式下危险操作（危险 shell 命令）的 TUI 确认实现：
-// 弹出居中确认弹窗（Allow / Deny / Cancel），←/→ 选择，Enter 确认。
+// 弹出居中确认弹窗（Allow / Deny），←/→ 选择，Enter 确认，Esc = Deny。
 //
 // 写文件工具（write_file/edit_file/delete）按用户决策直接执行，不经过确认；
 // 仅 run_command 的危险命令（黑名单/危险模式）需要确认。

@@ -9,20 +9,19 @@ import (
 )
 
 // confirmDialog 是危险操作的确认弹窗（覆盖层，模态）。
-// 三选项单行排布：Allow / Deny / Cancel；←/→ 循环选择，Enter 确认，Esc = Cancel。
-// Cancel 语义：仅拒绝本次操作（回传 Denied，界面显示 Cancelled 区分）。
+// 双选项单行排布：Allow / Deny；←/→ 循环选择，Enter 确认，Esc = Deny。
 // 弹窗是瞬态 UI 不落盘；聊天区保留 "Approve? <summary>" 提示与决策结果行
 // （会话恢复后仍可见确认历史）。
 type confirmDialog struct {
 	summary string
-	sel     int // 0=Allow, 1=Deny, 2=Cancel
+	sel     int // 0=Allow, 1=Deny
 	ch      chan agent.ApprovalDecision
 }
 
 // confirmLabels 选项显示文本。
-var confirmLabels = []string{"Allow", "Deny", "Cancel"}
+var confirmLabels = []string{"Allow", "Deny"}
 
-// confirmMove 移动选择（循环 wrap：Allow ↔ Deny ↔ Cancel）。
+// confirmMove 移动选择（循环 wrap：Allow ↔ Deny）。
 func (t *TUI) confirmMove(dy int) {
 	c := t.confirm
 	if c == nil {
@@ -32,34 +31,29 @@ func (t *TUI) confirmMove(dy int) {
 }
 
 // confirmConfirm 确认选中项并关闭弹窗：决策经 channel 回传阻塞中的
-// Approver.Request，结果行按选项着色（Approved 绿 / Denied 红 / Cancelled 黄）。
+// Approver.Request，结果行按选项着色（Approved 绿 / Denied 红）。
 func (t *TUI) confirmConfirm() {
 	c := t.confirm
 	if c == nil {
 		return
 	}
 	t.confirm = nil
-	switch c.sel {
-	case 1:
+	if c.sel == 1 {
 		c.ch <- agent.Denied
 		t.chat.appendSystem(colorize("Denied", ansiRed))
-	case 2:
-		// Cancel 语义 = 拒绝本次操作（与 Deny 同值，界面区分显示）
-		c.ch <- agent.Denied
-		t.chat.appendSystem(colorize("Cancelled", ansiYellow))
-	default:
-		c.ch <- agent.Approved
-		t.chat.appendSystem(colorize("Approved", ansiGreen))
+		return
 	}
+	c.ch <- agent.Approved
+	t.chat.appendSystem(colorize("Approved", ansiGreen))
 }
 
-// confirmCancel 取消（Esc）：等同选择 Cancel。
+// confirmCancel 取消（Esc）：等同选择 Deny。
 func (t *TUI) confirmCancel() {
 	c := t.confirm
 	if c == nil {
 		return
 	}
-	c.sel = 2
+	c.sel = 1
 	t.confirmConfirm()
 }
 
