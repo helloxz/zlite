@@ -118,5 +118,5 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 ## MCP（Model Context Protocol）
 
-MCP server（`[mcp]` 段、`~/.zlite/mcp/` 下的一 server 一文件配置）的
+MCP server（`[mcp]` 段、`~/.zlite/mcp.json` 的 `mcpServers` JSON 配置）的
 完整说明见 [docs/mcp.md](mcp.md)。

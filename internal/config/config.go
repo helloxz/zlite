@@ -103,7 +103,7 @@ func DefaultConfig() *Config {
 		Shell: ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
 		Tools: ToolsCfg{WebSearch: true}, // web_search 默认启用
 		MCP: MCPCfg{
-			Dir:               DefaultMCPDir,
+			File:              DefaultMCPFile,
 			Enabled:           true,
 			MaxServers:        DefaultMaxMCPServers,
 			MaxToolsPerServer: DefaultMaxToolsPerServer,
@@ -487,23 +487,31 @@ func WriteTemplate(path string) error {
 
 [mcp]
   enabled = true                  # MCP 总开关
-  dir = "~/.zlite/mcp"            # MCP server 配置目录（一 server 一个 toml 文件）
-  max_servers = 5                 # 同时启用上限（超出按文件名顺序丢弃并警告）
+  file = "~/.zlite/mcp.json"      # MCP server 配置（官方 mcpServers JSON 格式）
+  max_servers = 5                 # 同时启用上限（超出按 server 名排序丢弃并警告）
   max_tools_per_server = 20       # 单个 server 注入工具数上限
 
-# MCP server 配置放在 ~/.zlite/mcp/ 下，一 server 一个 toml 文件（文件名即 server 名），例如：
+# MCP server 配置放在 ~/.zlite/mcp.json（官方 Claude Code / Cursor 兼容格式），
+# 网上教程的 mcpServers 片段可直接粘贴，例如：
 #
-#   # ~/.zlite/mcp/github.toml
-#   transport = "stdio"                        # stdio | http | sse（缺省 stdio）
-#   command = "npx"                           # stdio 必填
-#   args = ["-y", "@modelcontextprotocol/server-github"]
-#   env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }   # 支持 ${ENV} 引用
-#   approve = "all"                           # all（每次调用需确认）| never（信任）
+#   {
+#     "mcpServers": {
+#       "github": {
+#         "command": "github-mcp-server",
+#         "args": ["stdio", "--toolsets", "repos,issues"],
+#         "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" }
+#       },
+#       "tavily": {
+#         "type": "http",
+#         "url": "https://mcp.tavily.com/mcp/",
+#         "headers": { "Authorization": "Bearer ${TAVILY_API_KEY}" }
+#       }
+#     }
+#   }
 #
-#   # ~/.zlite/mcp/remote.toml
-#   transport = "http"                        # http | sse 需配置 url
-#   url = "https://mcp.example.com"
-#   headers = { Authorization = "Bearer ${TOKEN}" }
+# 字段说明：type = stdio(缺省) | http | sse；disabled = true 禁用；
+# autoApprove = ["*"] 信任全部工具（免确认），或列工具名白名单；
+# env/headers 值支持 ${VAR} 与 ${env:VAR} 展开（变量放 ~/.zlite/.env）。
 `
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

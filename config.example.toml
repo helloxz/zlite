@@ -70,19 +70,19 @@ plan_extra_commands = []
 # 本节可选；不写则使用默认值。
 # MCP（Model Context Protocol）让模型调用第三方 server 提供的工具（地图、
 # GitHub、数据库等）。server 由第三方提供，zlite 只负责连接与调度。
-# 配置采用"一 server 一文件"：每个 server 一个 .toml 放在 [mcp].dir 目录
-# （缺省 ~/.zlite/mcp/），文件名即 server 名（如 github.toml → "github"），
-# 工具以 "<server>_<tool>" 前缀注册（如 github_get_file_contents）。
+# 配置使用官方生态通用的 JSON 格式（Claude Code / Cursor 的 mcpServers 约定），
+# 网上教程的 mcpServers 片段可直接粘贴，零转换。工具以 "<server>_<tool>"
+# 前缀注册（如 github_get_file_contents）。
 
 [mcp]
 # （可选）MCP 总开关。默认 true（设 false 可一键全关）。
 enabled = true
 
-# （可选）server 配置目录（支持 ~ 展开）。默认 "~/.zlite/mcp"。
-# 目录不存在视为未配置 MCP，不影响启动。
-dir = "~/.zlite/mcp"
+# （可选）server 配置文件路径（支持 ~ 展开）。默认 "~/.zlite/mcp.json"。
+# 文件不存在视为未配置 MCP，不影响启动。
+file = "~/.zlite/mcp.json"
 
-# （可选）同时启用的 server 数量上限；超出按文件名顺序丢弃后面的并警告。
+# （可选）同时启用的 server 数量上限；超出按 server 名排序丢弃后面的并警告。
 # 默认 5。工具注入过多会稀释模型的工具选择，建议保持小值。
 max_servers = 5
 

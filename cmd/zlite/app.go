@@ -123,11 +123,11 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	})
 	reg.Register(tools.ReadSkillTool(sk))
 
-	// MCP：加载 ~/.zlite/mcp/ 配置（同步解析，快）并在后台连接（不阻塞启动）；
+	// MCP：加载 ~/.zlite/mcp.json 配置（同步解析，快）并在后台连接（不阻塞启动）；
 	// 工具在首轮对话前由 preRun（Attach）注册进注册表。
 	var mcpMgr *mcp.Manager
 	if cfg.MCP.Enabled {
-		mcpMgr = mcp.New(cfg.MCP.Dir, cfg.MCP.MaxServers, cfg.MCP.MaxToolsPerServer)
+		mcpMgr = mcp.New(cfg.MCP.File, cfg.MCP.MaxServers, cfg.MCP.MaxToolsPerServer)
 		// 配置解析警告立即打印（TUI 尚未启动，stderr 安全）
 		for _, w := range mcpMgr.ConfigWarnings() {
 			fmt.Fprintln(os.Stderr, w)

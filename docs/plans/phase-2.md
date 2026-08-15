@@ -83,12 +83,15 @@
 
 ## 4. MCP server 集成（已实现，2026-08）
 
-- 配置：`config.toml` 的 `[mcp]` 段（`enabled` / `dir` / `max_servers` / `max_tools_per_server`），
-  server 一文件放 `~/.zlite/mcp/<name>.toml`（文件名即 server 名）
-- transport：stdio / http / sse；`env`、`headers` 支持 `${VAR}` 展开（含串内拼接）
-- 权限：`approve = "all"`（缺省，每次调用经 Approver 确认）| `never`；双模式（plan/build）可见
+- 配置：`config.toml` 的 `[mcp]` 段（`enabled` / `file` / `max_servers` / `max_tools_per_server`），
+  server 配置用官方生态通用的 `mcpServers` JSON 格式，单文件 `~/.zlite/mcp.json`
+  （Claude Code / Cursor 兼容，网上配置粘贴即用；2026-08 由 TOML 目录模式迁移而来）
+- transport：`type` = stdio / http / sse；`env`、`headers` 支持 `${VAR}` 与 `${env:VAR}` 展开
+  （含串内拼接）；`${input:xxx}` 占位不支持（跳过并警告）；整串 command（"npx -y pkg url"）自动拆分
+- 权限：`autoApprove` 白名单——`["*"]` 信任全部、工具名名单免确认命中项、缺省每次调用经 Approver 确认；
+  双模式（plan/build）可见
 - 生命周期：后台并行连接不阻塞启动，首轮对话前 `Attach` 幂等注册工具（`<server>_<tool>` 前缀），
   单 server 失败降级为警告（TUI system 消息）；退出统一 Close（终止 stdio 子进程）
-- 限制：`max_servers = 5`（缺省）、`max_tools_per_server = 20`（缺省），超出按文件名顺序丢弃并警告
-- 一期不做：远程 OAuth、动态工具刷新（list_changed）、项目级 mcp 目录叠加、懒加载
+- 限制：`max_servers = 5`（缺省）、`max_tools_per_server = 20`（缺省），超出按 server 名排序丢弃并警告
+- 一期不做：远程 OAuth、动态工具刷新（list_changed）、项目级 `.mcp.json` 叠加、懒加载
 

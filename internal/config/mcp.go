@@ -1,59 +1,54 @@
-// Package config 的 MCP 部分：config.toml 的 [mcp] 段与 ~/.zlite/mcp/ 目录扫描。
+// Package config 的 MCP 部分：config.toml 的 [mcp] 段与 ~/.zlite/mcp.json 解析。
 //
-// MCP server 配置为"一 server 一文件"：~/.zlite/mcp/<name>.toml（文件名即
-// server 名，文件内不重复写）。单文件解析失败只产生 warning 并跳过，
-// 不影响其他文件——第三方 server 配置五花八门，不能拖垮整体启动。
+// MCP server 配置使用官方生态通用的 JSON 格式（Claude Code / Cursor 的
+// mcpServers 约定）：~/.zlite/mcp.json 一个文件包含全部 server，网上教程的
+// 配置片段可直接粘贴，零转换。TOML 目录模式已移除（不再兼容）。
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 // MCP 相关常量与默认值。
 const (
-	// DefaultMCPDir 是默认 MCP 配置目录（~/.zlite/mcp/）。
-	DefaultMCPDir = "~/.zlite/mcp"
+	// DefaultMCPFile 是默认 MCP 配置文件（~/.zlite/mcp.json）。
+	DefaultMCPFile = "~/.zlite/mcp.json"
 	// DefaultMaxMCPServers 是默认同时启用的 server 数量上限：
-	// 超出按文件名顺序丢弃（工具注入过多会稀释模型工具选择）。
+	// 超出按 server 名排序丢弃（工具注入过多会稀释模型工具选择）。
 	DefaultMaxMCPServers = 5
 	// DefaultMaxToolsPerServer 是单个 server 注入工具数上限。
 	DefaultMaxToolsPerServer = 20
 
-	// transport 类型。
+	// transport 类型（官方 type 字段取值）。
 	MCPTransportStdio = "stdio"
 	MCPTransportHTTP  = "http"
 	MCPTransportSSE   = "sse"
-
-	// approve 取值：all = 每次工具调用需人工确认（安全默认）；
-	// never = 信任该 server 直接执行（用户显式声明）。
-	MCPApproveAll   = "all"
-	MCPApproveNever = "never"
 )
 
 // MCPCfg 是 config.toml 的 [mcp] 段。
 type MCPCfg struct {
-	// Dir 是 server 配置目录（一 server 一文件）；支持 ~ 展开。缺省 ~/.zlite/mcp。
-	Dir string `mapstructure:"dir"`
 	// Enabled 一键开关（缺省 true）。
 	Enabled bool `mapstructure:"enabled"`
-	// MaxServers 同时启用的 server 上限（缺省 5，超出按文件名顺序丢弃并警告）。
+	// File 是 server 配置文件的路径（官方 mcpServers JSON 格式）。
+	// 缺省 ~/.zlite/mcp.json；支持 ~ 展开。
+	File string `mapstructure:"file"`
+	// MaxServers 同时启用的 server 上限（缺省 5，超出按 server 名排序丢弃并警告）。
 	MaxServers int `mapstructure:"max_servers"`
-	// MaxToolsPerServer 单 server 注入工具数上限（缺省 20，超出丢弃并警告）。
+	// MaxToolsPerServer 单 server 注入工具数上限（缺省 20）。
 	MaxToolsPerServer int `mapstructure:"max_tools_per_server"`
 }
 
-// MCPServer 是一个 MCP server 的配置（~/.zlite/mcp/<name>.toml 解析结果）。
-// Name 取自文件名（去 .toml 后缀）。
+// MCPServer 是一个 MCP server 的配置（mcp.json 单个条目的解析结果）。
 type MCPServer struct {
+	// Name 是 mcpServers 对象里的 key（server 名）。
 	Name string
-	// Enabled 是否启用（enabled = false 的 server 跳过，等价于删除文件）。
+	// Enabled 是否启用（disabled: true 的 server 跳过，等价于删除条目）。
 	Enabled bool
 	// Transport: stdio | http | sse（缺省 stdio）。
 	Transport string
@@ -66,105 +61,84 @@ type MCPServer struct {
 	URL string
 	// Headers: http/sse 请求头（值支持 ${VAR} 展开）。
 	Headers map[string]string
-	// Approve: all（缺省，每次工具调用需确认）| never（信任直接执行）。
-	Approve string
-	// Modes: 可见模式（plan/build 子集；缺省双模式均可见）。
-	Modes []string
-	// Path 配置文件绝对路径（错误提示用）。
+	// AutoApprove: 免确认的工具名白名单（匹配 MCP server 返回的原始工具名）。
+	// ["*"] = 信任该 server 全部工具；nil/空 = 全部工具每次调用需人工确认。
+	AutoApprove []string
+	// Path 配置文件路径（错误提示用）。
 	Path string
 }
 
-// serverFile 是单个 server 配置文件的 TOML 结构。
-// Enabled 用指针区分"未设置"与"false"（缺省 true）。
-type serverFile struct {
-	Enabled   *bool             `toml:"enabled"`
-	Transport string            `toml:"transport"`
-	Command   string            `toml:"command"`
-	Args      []string          `toml:"args"`
-	Env       map[string]string `toml:"env"`
-	URL       string            `toml:"url"`
-	Headers   map[string]string `toml:"headers"`
-	Approve   string            `toml:"approve"`
-	Modes     []string          `toml:"modes"`
+// mcpFile 是 mcp.json 的顶层结构（官方 mcpServers 约定）。
+type mcpFile struct {
+	McpServers map[string]mcpServerEntry `json:"mcpServers"`
 }
 
-// mcpNamePattern 校验 server 名（即文件名）：字母数字下划线连字符。
+// mcpServerEntry 是单个 server 条目（Claude Code / Cursor 生态格式）。
+// 未知字段由 json.Unmarshal 默认忽略，保证与其他客户端配置互相兼容。
+type mcpServerEntry struct {
+	Type        string            `json:"type"` // stdio | http | sse（缺省 stdio）
+	Command     string            `json:"command"`
+	Args        []string          `json:"args"`
+	Env         map[string]string `json:"env"`
+	URL         string            `json:"url"`
+	Headers     map[string]string `json:"headers"`
+	Disabled    bool              `json:"disabled"`
+	AutoApprove []string          `json:"autoApprove"`
+}
+
+// mcpNamePattern 校验 server 名：字母数字下划线连字符。
 // 名字会拼进工具名（<server>_<tool>），须避免非法字符。
 var mcpNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // envInlinePattern 匹配串内 ${VAR} 引用（支持拼接，如 "Bearer ${TOKEN}"）。
-// 与 config.go 的 expandEnv（仅整串）互补：MCP headers/env 拼接是常见写法。
 var envInlinePattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expandEnvInline 展开字符串中所有 ${VAR} 引用；任一变量缺失返回错误。
-func expandEnvInline(s string) (string, error) {
-	var firstErr error
-	out := envInlinePattern.ReplaceAllStringFunc(s, func(m string) string {
-		name := envInlinePattern.FindStringSubmatch(m)[1]
-		v, ok := os.LookupEnv(name)
-		if !ok || v == "" {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("environment variable %s not set", name)
-			}
-			return m
-		}
-		return v
-	})
-	if firstErr != nil {
-		return "", firstErr
-	}
-	return out, nil
-}
+// envPrefixedPattern 匹配 ${env:VAR}（Claude Code / Cursor 常见语法，等价 ${VAR}）。
+var envPrefixedPattern = regexp.MustCompile(`\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// LoadMCPServers 扫描 dir 下的 *.toml（一 server 一文件，文件名即 name），
-// 解析为 MCPServer 列表（按文件名排序，顺序可预期）。
+// inputPlaceholderPattern 匹配 ${input:xxx}（宿主交互输入占位，zlite 不支持）。
+var inputPlaceholderPattern = regexp.MustCompile(`\$\{input:[^}]*\}`)
+
+// LoadMCPServers 解析 MCP 配置文件（缺省 ~/.zlite/mcp.json），
+// 返回 MCPServer 列表（按 server 名排序，顺序可预期）。
 //
-// 目录不存在返回空集（未配置 MCP 是正常状态）；单文件解析失败只产生
-// warning 并跳过；enabled=false 的 server 静默剔除。env/headers 中的
-// ${VAR} 引用展开（支持串内拼接）；展开失败（环境变量未设置）该 server
-// 跳过并警告。
-func LoadMCPServers(dir string) ([]MCPServer, []string, error) {
-	if dir == "" {
-		dir = DefaultMCPDir
+// 文件不存在返回空集（未配置 MCP 是正常状态）。JSON 语法错误返回 error；
+// 单个 server 条目非法（缺 command/url、type 不认识、环境变量缺失、
+// ${input:} 占位等）只产生 warning 并跳过，不影响其他条目。
+func LoadMCPServers(file string) ([]MCPServer, []string, error) {
+	if file == "" {
+		file = DefaultMCPFile
 	}
-	dir, err := expandHomeDir(dir)
+	file, err := expandHomeDir(file)
 	if err != nil {
 		return nil, nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, nil // 未配置 MCP：正常空集
 		}
-		return nil, nil, fmt.Errorf("read MCP config dir failed: %w", err)
+		return nil, nil, fmt.Errorf("read MCP config file failed: %w", err)
+	}
+	var f mcpFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, nil, fmt.Errorf("parse MCP config %s failed: %w", file, err)
 	}
 
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".toml") {
-			names = append(names, e.Name())
-		}
+	// 对象 key 无序：排序保证确定性（max_servers 截断依赖顺序）
+	names := make([]string, 0, len(f.McpServers))
+	for name := range f.McpServers {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 
 	var servers []MCPServer
 	var warnings []string
 	for _, name := range names {
-		path := filepath.Join(dir, name)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("mcp: read %s failed: %v", name, err))
-			continue
-		}
-		var f serverFile
-		if err := toml.Unmarshal(data, &f); err != nil {
-			warnings = append(warnings, fmt.Sprintf("mcp: %s parse failed (skipped): %v", name, err))
-			continue
-		}
-		s, warn, ok := buildServer(strings.TrimSuffix(name, ".toml"), path, f)
+		s, warn, ok := buildServer(name, file, f.McpServers[name])
 		if !ok {
 			if warn != "" {
-				warnings = append(warnings, fmt.Sprintf("mcp: %s: %s (skipped)", name, warn))
+				warnings = append(warnings, fmt.Sprintf("mcp: server %q: %s (skipped)", name, warn))
 			}
 			continue // 禁用或非法：均不保留
 		}
@@ -175,61 +149,48 @@ func LoadMCPServers(dir string) ([]MCPServer, []string, error) {
 
 // buildServer 校验并构造 MCPServer。
 // ok=false 表示不保留（warn 非空 = 配置非法；warn 空 = 用户主动禁用）。
-func buildServer(name, path string, f serverFile) (s MCPServer, warn string, ok bool) {
+func buildServer(name, path string, e mcpServerEntry) (s MCPServer, warn string, ok bool) {
 	if !mcpNamePattern.MatchString(name) {
 		return MCPServer{}, fmt.Sprintf("invalid server name %q (use letters, digits, _ or -)", name), false
 	}
-	if f.Enabled != nil && !*f.Enabled {
-		return MCPServer{}, "", false // 已禁用：静默剔除（等价于删除文件）
+	if e.Disabled {
+		return MCPServer{}, "", false // 已禁用：静默剔除
 	}
-	transport := f.Transport
+	transport := e.Type
 	if transport == "" {
 		transport = MCPTransportStdio
 	}
 	switch transport {
 	case MCPTransportStdio, MCPTransportHTTP, MCPTransportSSE:
 	default:
-		return MCPServer{}, fmt.Sprintf("invalid transport %q (stdio | http | sse)", f.Transport), false
+		return MCPServer{}, fmt.Sprintf("invalid type %q (stdio | http | sse)", e.Type), false
 	}
-	if transport == MCPTransportStdio && strings.TrimSpace(f.Command) == "" {
-		return MCPServer{}, "transport=stdio requires command", false
+
+	command, args, warn := resolveCommand(e)
+	if warn != "" {
+		return MCPServer{}, warn, false
 	}
-	if transport != MCPTransportStdio && strings.TrimSpace(f.URL) == "" {
-		return MCPServer{}, fmt.Sprintf("transport=%s requires url", transport), false
+	if transport == MCPTransportStdio && command == "" {
+		return MCPServer{}, "type=stdio requires command", false
 	}
-	approve := f.Approve
-	if approve == "" {
-		approve = MCPApproveAll
-	}
-	switch approve {
-	case MCPApproveAll, MCPApproveNever:
-	default:
-		return MCPServer{}, fmt.Sprintf("invalid approve %q (all | never)", f.Approve), false
-	}
-	modes := f.Modes
-	if len(modes) == 0 {
-		modes = []string{ModePlan, ModeBuild} // 缺省双模式可见
-	}
-	for _, m := range modes {
-		if m != ModePlan && m != ModeBuild {
-			return MCPServer{}, fmt.Sprintf("invalid mode %q (plan | build)", m), false
-		}
+	if transport != MCPTransportStdio && strings.TrimSpace(e.URL) == "" {
+		return MCPServer{}, fmt.Sprintf("type=%s requires url", transport), false
 	}
 
 	s = MCPServer{
-		Name:      name,
-		Enabled:   true,
-		Transport: transport,
-		Command:   f.Command,
-		Args:      f.Args,
-		Env:       f.Env,
-		URL:       f.URL,
-		Headers:   f.Headers,
-		Approve:   approve,
-		Modes:     modes,
-		Path:      path,
+		Name:        name,
+		Enabled:     true,
+		Transport:   transport,
+		Command:     command,
+		Args:        args,
+		Env:         e.Env,
+		URL:         e.URL,
+		Headers:     e.Headers,
+		AutoApprove: e.AutoApprove,
+		Path:        path,
 	}
-	// ${VAR} 展开（env/headers，支持串内拼接）：任一展开失败视为配置错误
+	// ${VAR} / ${env:VAR} 展开（env/headers，支持串内拼接）：
+	// 变量缺失或含 ${input:} 占位视为配置错误（server 跳过）
 	for k, v := range s.Env {
 		ev, err := expandEnvInline(v)
 		if err != nil {
@@ -245,6 +206,73 @@ func buildServer(name, path string, f serverFile) (s MCPServer, warn string, ok 
 		s.Headers[k] = ev
 	}
 	return s, "", true
+}
+
+// resolveCommand 解析启动命令：
+//   - command + args 数组：直接使用；
+//   - command 为整串（含空格，网上常见 "npx -y pkg url"）：按空白拆分为
+//     command + args；含引号时无法安全拆分，返回警告。
+func resolveCommand(e mcpServerEntry) (command string, args []string, warn string) {
+	if e.Command == "" {
+		return "", nil, ""
+	}
+	if len(e.Args) > 0 {
+		return e.Command, e.Args, ""
+	}
+	if !strings.ContainsAny(e.Command, " \t") {
+		return e.Command, nil, ""
+	}
+	fields := strings.Fields(e.Command)
+	for _, f := range fields {
+		if strings.ContainsAny(f, `"'`) {
+			return "", nil, "command contains quotes and cannot be split automatically; use command + args array form"
+		}
+	}
+	if len(fields) == 0 {
+		return "", nil, "empty command"
+	}
+	return fields[0], fields[1:], ""
+}
+
+// expandEnvInline 展开字符串中的 ${VAR} 与 ${env:VAR} 引用（支持拼接）。
+// 任一变量缺失返回错误；含 ${input:xxx} 占位返回错误（zlite 无输入机制）。
+func expandEnvInline(s string) (string, error) {
+	if inputPlaceholderPattern.MatchString(s) {
+		return "", fmt.Errorf("${input:...} placeholder is not supported; replace it with ${VAR} or a literal value")
+	}
+	// ${env:VAR} → 与 ${VAR} 等价展开
+	s = envPrefixedPattern.ReplaceAllStringFunc(s, func(m string) string {
+		name := envPrefixedPattern.FindStringSubmatch(m)[1]
+		v, ok := os.LookupEnv(name)
+		if !ok || v == "" {
+			return "${ENVCHECK_MISSING:" + name + "}" // 哨兵：后续统一报缺失
+		}
+		return v
+	})
+	var firstErr error
+	out := envInlinePattern.ReplaceAllStringFunc(s, func(m string) string {
+		name := envInlinePattern.FindStringSubmatch(m)[1]
+		v, ok := os.LookupEnv(name)
+		if !ok || v == "" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("environment variable %s not set", name)
+			}
+			return m
+		}
+		return v
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	// ${env:VAR} 阶段缺失的变量：哨兵转真实错误信息
+	if i := strings.Index(out, "${ENVCHECK_MISSING:"); i >= 0 {
+		end := strings.Index(out[i:], "}")
+		if end > 0 {
+			name := out[i+len("${ENVCHECK_MISSING:") : i+end]
+			return "", fmt.Errorf("environment variable %s not set", name)
+		}
+	}
+	return out, nil
 }
 
 // expandHomeDir 展开前导 ~ 为用户主目录（"~" 或 "~/..."）。

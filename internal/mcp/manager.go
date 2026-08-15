@@ -1,6 +1,6 @@
-// Package mcp 实现 zlite 的 MCP 集成：加载 ~/.zlite/mcp/ 目录配置、
-// 连接 MCP server（stdio/http/sse）、把远端工具桥接为 tools.Tool 注册进
-// 工具注册表。
+// Package mcp 实现 zlite 的 MCP 集成：加载 ~/.zlite/mcp.json（官方 mcpServers
+// JSON 格式）、连接 MCP server（stdio/http/sse）、把远端工具桥接为
+// tools.Tool 注册进工具注册表。
 //
 // 连接在后台进行（不阻塞启动）；首轮对话前由 Attach 幂等确保连接完成
 // 并注册工具。单个 server 连接失败降级为警告并跳过，不影响其余 server
@@ -58,9 +58,9 @@ type Manager struct {
 	cancel  context.CancelFunc
 }
 
-// New 解析 MCP 配置目录并创建 Manager（不发起任何连接）。
-// 目录不存在或未配置时为空集；maxServers/maxToolsPerServer <= 0 用默认值。
-func New(dir string, maxServers, maxToolsPerServer int) *Manager {
+// New 解析 MCP 配置文件（mcpServers JSON 格式）并创建 Manager（不发起任何连接）。
+// 文件不存在或未配置时为空集；maxServers/maxToolsPerServer <= 0 用默认值。
+func New(file string, maxServers, maxToolsPerServer int) *Manager {
 	m := &Manager{
 		maxServers: maxServers,
 		maxTools:   maxToolsPerServer,
@@ -73,13 +73,13 @@ func New(dir string, maxServers, maxToolsPerServer int) *Manager {
 	if m.maxTools <= 0 {
 		m.maxTools = config.DefaultMaxToolsPerServer
 	}
-	servers, warns, err := config.LoadMCPServers(dir)
+	servers, warns, err := config.LoadMCPServers(file)
 	if err != nil {
 		m.cfgWarnings = append(m.cfgWarnings, "mcp: "+err.Error())
 		return m
 	}
 	m.cfgWarnings = append(m.cfgWarnings, warns...)
-	// 数量上限：按文件名顺序丢弃后面的（顺序可预期，改名即可调整保留谁）
+	// 数量上限：按 server 名排序丢弃后面的（顺序可预期，改名即可调整保留谁）
 	if len(servers) > m.maxServers {
 		dropped := make([]string, 0, len(servers)-m.maxServers)
 		for _, s := range servers[m.maxServers:] {
@@ -285,17 +285,26 @@ func (m *Manager) bridgeTool(c *conn, t goaimcp.Tool) tools.Tool {
 				return goaimcp.FormatContent(res.Content, res.IsError), nil
 			},
 		},
-		Modes: make([]tools.Mode, 0, len(c.cfg.Modes)),
+		Modes: []tools.Mode{tools.ModePlan, tools.ModeBuild}, // 用户决策：plan/build 双模式均可用
 	}
-	for _, mm := range c.cfg.Modes {
-		tt.Modes = append(tt.Modes, tools.Mode(mm))
-	}
-	if c.cfg.Approve == config.MCPApproveAll {
+	// 权限按 autoApprove 白名单包装：名单含 "*" 或含该工具名（原始名）时免确认；
+	// 名单为空或未命中时每次调用需人工确认
+	if len(c.cfg.AutoApprove) == 0 || !autoApproved(c.cfg.AutoApprove, t.Name) {
 		tt.NeedApprove = func(map[string]any) (bool, string) {
 			return true, fmt.Sprintf("call MCP tool %q on server %q", name, c.cfg.Name)
 		}
 	}
 	return tt
+}
+
+// autoApproved 判断工具是否在免确认白名单（"*" 表示全部）。
+func autoApproved(list []string, toolName string) bool {
+	for _, n := range list {
+		if n == "*" || n == toolName {
+			return true
+		}
+	}
+	return false
 }
 
 // TakeWarnings 取走并清空连接阶段警告（Attach 后广播一次）。
