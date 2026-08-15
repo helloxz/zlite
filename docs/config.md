@@ -67,6 +67,11 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
   # build 模式下执行这些命令前缀时需要人工确认（默认值）
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
   plan_extra_commands = [] # plan 模式额外放行命令（与内置只读白名单合并、去重；如 ["python3"]）
+
+# ============ 内置工具 ============
+
+[tools]
+  web_search = true # 启用 web_search 联网搜索工具（Tavily）；不需要联网时改为 false
 ```
 
 ## 配置项速查表
@@ -85,6 +90,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 | `agent.load_agents_md` | bool | `true` | 自动加载项目 AGENTS.md |
 | `shell.confirm_commands` | string[] | 见模板 | 需确认的命令前缀 |
 | `shell.plan_extra_commands` | string[] | `[]` | plan 模式额外放行命令名（与内置白名单合并去重） |
+| `tools.web_search` | bool | `true` | 启用 web_search 联网搜索工具（Tavily）；`false` 时不注册，模型无法联网搜索 |
 
 ## 示例：多渠道 + Anthropic + 默认模型
 
@@ -109,3 +115,8 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 > 注意：`openai.responses` 要求端点支持 `/responses`；
 > 自建网关/兼容服务若只实现 Chat Completions，请保持 `openai.chat`。
+
+## MCP（Model Context Protocol）
+
+MCP server（`[mcp]` 段、`~/.zlite/mcp/` 下的一 server 一文件配置）的
+完整说明见 [docs/mcp.md](mcp.md)。

@@ -116,7 +116,11 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	// skills：全局 ~/.zlite/skills/ + 项目 <cwd>/.zlite/skills/（项目优先同名覆盖），
 	// read_skill 工具供模型按需读取 skill 正文
 	sk := skills.New(filepath.Join(filepath.Dir(cfgPath), "skills"), filepath.Join(cwd, ".zlite", "skills"))
-	reg := tools.New(cwd, cfg.Shell.ConfirmCommands, cfg.Shell.PlanExtraCommands)
+	reg := tools.New(cwd, tools.Options{
+		ConfirmCommands:   cfg.Shell.ConfirmCommands,
+		PlanExtraCommands: cfg.Shell.PlanExtraCommands,
+		WebSearch:         cfg.Tools.WebSearch,
+	})
 	reg.Register(tools.ReadSkillTool(sk))
 
 	// MCP：加载 ~/.zlite/mcp/ 配置（同步解析，快）并在后台连接（不阻塞启动）；

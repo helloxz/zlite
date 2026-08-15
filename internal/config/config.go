@@ -48,6 +48,7 @@ type Config struct {
 	Providers []Provider `mapstructure:"providers"`
 	Agent     AgentCfg   `mapstructure:"agent"`
 	Shell     ShellCfg   `mapstructure:"shell"`
+	Tools     ToolsCfg   `mapstructure:"tools"`
 	MCP       MCPCfg     `mapstructure:"mcp"`
 }
 
@@ -83,6 +84,13 @@ type ShellCfg struct {
 	PlanExtraCommands []string `mapstructure:"plan_extra_commands"`
 }
 
+// ToolsCfg 是内置工具开关配置。
+type ToolsCfg struct {
+	// WebSearch 是否启用 web_search 联网搜索工具（默认启用；
+	// false 时不注册，模型无法调用联网搜索）。
+	WebSearch bool `mapstructure:"web_search"`
+}
+
 // DefaultConfig 返回带默认值的配置。
 func DefaultConfig() *Config {
 	return &Config{
@@ -93,6 +101,7 @@ func DefaultConfig() *Config {
 			LoadAgentsMD: true,
 		},
 		Shell: ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
+		Tools: ToolsCfg{WebSearch: true}, // web_search 默认启用
 		MCP: MCPCfg{
 			Dir:               DefaultMCPDir,
 			Enabled:           true,
@@ -472,6 +481,9 @@ func WriteTemplate(path string) error {
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
   plan_extra_commands = []       # plan 模式额外放行命令（与内置只读白名单合并、去重）
+
+[tools]
+  web_search = true              # 启用 web_search 联网搜索工具（Tavily，默认启用）；不需要联网时改为 false
 
 [mcp]
   enabled = true                  # MCP 总开关

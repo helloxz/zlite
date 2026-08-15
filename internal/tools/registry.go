@@ -42,18 +42,30 @@ type Registry struct {
 	tools   []Tool
 }
 
+// Options 是 New 的配置项。
+type Options struct {
+	// ConfirmCommands 是 build 模式下需要确认的危险命令清单。
+	ConfirmCommands []string
+	// PlanExtraCommands 是用户追加到 plan 模式只读白名单的命令名。
+	PlanExtraCommands []string
+	// WebSearch 是否注册 web_search 工具（由上层按 config [tools] 段传入）。
+	WebSearch bool
+}
+
 // New 创建注册表并注册内置工具。
-// cwd 是工具执行的基准目录；confirmCommands 是 build 模式下需要确认的危险命令清单；
-// planExtraCommands 是用户追加到 plan 模式只读白名单的命令名（与内置合并、去重）。
-func New(cwd string, confirmCommands, planExtraCommands []string) *Registry {
-	r := &Registry{cwd: cwd, confirm: confirmCommands}
+// cwd 是工具执行的基准目录；opts 携带危险命令清单、plan 只读白名单追加项
+// 与 web_search 开关（false 时不注册该工具，plan/build 均不可见）。
+func New(cwd string, opts Options) *Registry {
+	r := &Registry{cwd: cwd, confirm: opts.ConfirmCommands}
 	r.register(readFileTool(cwd))
 	r.register(grepTool(cwd))
 	r.register(globTool(cwd))
 	r.register(webFetchTool())
-	r.register(webSearchTool())
-	r.register(runCommandPlanTool(cwd, planExtraCommands))
-	r.register(runCommandBuildTool(cwd, confirmCommands))
+	if opts.WebSearch {
+		r.register(webSearchTool())
+	}
+	r.register(runCommandPlanTool(cwd, opts.PlanExtraCommands))
+	r.register(runCommandBuildTool(cwd, opts.ConfirmCommands))
 	r.register(writeFileTool(cwd))
 	r.register(editFileTool(cwd))
 	r.register(deleteTool(cwd))

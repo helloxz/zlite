@@ -494,7 +494,11 @@ func (a *Agent) newSessionState(zs *session.Session, model, cwd string) *session
 	}
 
 	// 工具注册表按会话 cwd 构建：路径解析与命令执行目录跟随会话 cwd
-	reg := tools.New(cwd, a.opts.Cfg.Shell.ConfirmCommands, a.opts.Cfg.Shell.PlanExtraCommands)
+	reg := tools.New(cwd, tools.Options{
+		ConfirmCommands:   a.opts.Cfg.Shell.ConfirmCommands,
+		PlanExtraCommands: a.opts.Cfg.Shell.PlanExtraCommands,
+		WebSearch:         a.opts.Cfg.Tools.WebSearch,
+	})
 	// skills 按会话 cwd 构建：项目 skills 目录 <cwd>/.zlite/skills/，
 	// 全局目录不变；GlobalSkillsDir 为空时不启用 skills
 	var skm *skills.Manager
