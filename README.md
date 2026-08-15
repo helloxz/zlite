@@ -1,25 +1,26 @@
 # Zlite
 
-Zlite 是一个轻量级 CLI AI Agent——小体积、低内存，适合日常对话、轻量编码，也可作为服务器软件的 Agent 大脑，用自然语言直接操作和管理 `nginx` 等服务。
+[简体中文](README.zh-CN.md) | **English**
 
-## 特性
+Zlite is a lightweight CLI AI agent — small footprint, low memory usage. It's great for everyday conversations and light coding, and can also act as the agent brain for server software, letting you operate and manage services like `nginx` directly through natural language.
 
-* **轻量级**：单文件二进制，体积 <12MB、内存占用 ≈20MB，下载即用
-* **跨平台**：同时支持 Linux、macOS、Windows
-* **多模型接入**：支持任意 OpenAI、Anthropic 兼容模型，可配置多个 Provider 随时切换
-* **TUI 界面**：全功能终端交互，支持快捷键操作与 plan / build 模式切换
-* **内置工具集**：读文件、搜索、写 / 改 / 删文件、Shell 执行、网页抓取、网络搜索等能力开箱即用
-* **MCP 支持**：可调用任意 MCP 服务器提供的工具，接入丰富的外部生态
-* **Skills 支持**：可加载项目级与全局 Skills，复用指令与工作流
-* **ACP 协议**：作为 Agent 端接入任意 ACP 客户端，如 [Zacp](https://github.com/helloxz/zacp)、Zed、Codeg
-* **上下文压缩**：长对话自动压缩，防止上下文爆炸
-* **会话管理**：持久存储，支持会话恢复与切换
-* **权限确认**：危险操作（如 Shell 命令）执行前请求人工确认
+## Features
 
+* **Lightweight**: single-file binary, <12MB in size and ≈20MB memory usage, ready to use after download
+* **Cross-platform**: supports Linux, macOS, and Windows
+* **Multi-model support**: works with any OpenAI- or Anthropic-compatible model; configure multiple providers and switch anytime
+* **TUI interface**: full-featured terminal UI with keyboard shortcuts and plan / build mode switching
+* **Built-in tools**: read files, search, write / edit / delete files, run shell commands, fetch web pages, and search the web — all out of the box
+* **MCP support**: call tools from any MCP server and tap into a rich external ecosystem
+* **Skills support**: load project-level and global skills to reuse instructions and workflows
+* **ACP protocol**: act as an agent for any ACP client, such as [Zacp](https://github.com/helloxz/zacp), Zed, and Codeg
+* **Context compression**: automatically compresses long conversations to prevent context overflow
+* **Session management**: persistent storage with session resume and switching
+* **Permission confirmation**: dangerous operations (e.g. shell commands) require human approval before execution
 
-## 快速开始
+## Quick Start
 
-### 安装
+### Installation
 
 ### Linux / macOS
 
@@ -33,23 +34,23 @@ curl -fsSL https://raw.githubusercontent.com/helloxz/zlite/main/install.sh | bas
 irm https://raw.githubusercontent.com/helloxz/zlite/main/install.ps1 | iex
 ```
 
-### 初始化
+### Initialization
 
-安装完毕后执行`zlite`根据提示填写 OpenAI 兼容模型信息。
+After installation, run `zlite` and follow the prompts to enter your OpenAI-compatible model information.
 
-### 指令和快捷键
+### Commands and Shortcuts
 
-* `/init`：初始化项目
-* `/new`：新建对话，快捷键 `Ctrl + N`
-* `/sessions`：切换历史对话，快捷键 `Ctrl + L`
-* `/switch`：切换模型，快捷键 `Shift + Tab`
-* `/thinking`：切换思考强度，快捷键 `Ctrl + T`
-* `/compress`：压缩上下文（对话超过 10 轮后可用）
-* `/exit`：退出 TUI 终端，快捷键 `Ctrl + C`
-* 切换 plan / build 模式：快捷键 `Tab`
-* 聊天区滚动：`PgUp` / `PgDn` 翻页，`Home` / `End` 跳到顶部 / 底部
+* `/init`: initialize the project
+* `/new`: start a new conversation (shortcut: `Ctrl + N`)
+* `/sessions`: switch to a previous conversation (shortcut: `Ctrl + L`)
+* `/switch`: switch models (shortcut: `Shift + Tab`)
+* `/thinking`: toggle thinking effort (shortcut: `Ctrl + T`)
+* `/compress`: compress the context (available after more than 10 turns)
+* `/exit`: quit the TUI (shortcut: `Ctrl + C`)
+* Switch plan / build mode: `Tab`
+* Scroll the chat area: `PgUp` / `PgDn` to page, `Home` / `End` to jump to top / bottom
 
-### 一键更新
+### One-Click Update
 
 **Linux & macOS**
 
@@ -63,16 +64,16 @@ curl -fsSL https://raw.githubusercontent.com/helloxz/zlite/main/update.sh | bash
 irm https://raw.githubusercontent.com/helloxz/zlite/main/update.ps1 | iex
 ```
 
-## 从源码构建
+## Build from Source
 
-要求 Go ≥ 1.25
+Requires Go ≥ 1.25
 
 ```bash
-make build        # 产物 bin/zlite，自动注入版本号
+make build        # produces bin/zlite with the version info injected
 bin/zlite --version
 ```
 
-## 联系作者
+## Contact
 
 * Blog: [https://blog.xiaoz.org/](https://blog.xiaoz.org/)
 * X: [https://x.com/xiaozblog](https://x.com/xiaozblog)
