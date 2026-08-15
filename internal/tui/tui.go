@@ -93,9 +93,9 @@ type TUI struct {
 	screenH int
 	screenW int
 
-	// approvalCh 非 nil 时表示有正在等待用户确认的危险操作
-	// （仅消息循环线程读写：Approver 经 program.Send 设置，submit 消费）。
-	approvalCh chan agent.ApprovalDecision
+	// confirm 非 nil 时表示确认弹窗打开（模态，仅消息循环线程读写：
+	// Approver 经 program.Send 投递 approvalRequestMsg，handleKey 消费）。
+	confirm *confirmDialog
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -747,19 +747,4 @@ func (t *TUI) handleSetup(msg string) (tea.Cmd, error) {
 	return nil, nil
 }
 
-// handleApproval 处理确认输入（y 批准 / n 拒绝）。
-func (t *TUI) handleApproval(msg string) {
-	ch := t.approvalCh
-	switch msg {
-	case "y", "Y", "yes", "Yes":
-		t.approvalCh = nil
-		ch <- agent.Approved
-		t.chat.appendSystem(colorize("Approved", ansiGreen))
-	case "n", "N", "no", "No":
-		t.approvalCh = nil
-		ch <- agent.Denied
-		t.chat.appendSystem(colorize("Denied", ansiRed))
-	default:
-		t.chat.appendSystem("Please answer y (approve) or n (deny)")
-	}
-}
+

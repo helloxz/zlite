@@ -32,5 +32,7 @@ const (
 	keySwitch     = "shift+tab"
 	keyUp         = "up"
 	keyDown       = "down"
+	keyLeft       = "left"
+	keyRight      = "right"
 	keyCancel     = "esc"
 )

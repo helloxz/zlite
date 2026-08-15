@@ -33,7 +33,7 @@ type approvalRequestMsg struct {
 	ch      chan agent.ApprovalDecision
 }
 
-// approvalCancelMsg 是 Approver 因 ctx 取消而放弃等待（清 pendingApproval）。
+// approvalCancelMsg 是 Approver 因 ctx 取消而放弃等待（关闭确认弹窗）。
 type approvalCancelMsg struct{ ch chan agent.ApprovalDecision }
 
 // refreshMsg 请求重绘（外部注入 API 在消息循环外修改共享状态后触发）。
@@ -41,7 +41,7 @@ type refreshMsg struct{}
 
 // ---- model：bubbletea 的消息循环状态 ----
 
-// model 持有 *TUI 引用：共享状态（chat/status/approvalCh 等）都在 TUI 上，
+// model 持有 *TUI 引用：共享状态（chat/status/confirm 等）都在 TUI 上，
 // 消息只负责触发处理；tea 在每次 Update 后自动重绘，外部注入 API 的改动
 // 在下一次渲染自然生效。
 type model struct {
@@ -146,14 +146,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case approvalRequestMsg:
-		t.chat.appendSystem(colorize("Approve? "+msg.summary+"  [y/n] ", ansiYellow))
-		t.approvalCh = msg.ch
+		// 确认弹窗打开；聊天区保留提示行供会话落盘（弹窗是瞬态 UI）。
+		// 互斥：若列表弹窗已打开先关闭（onPick 不触发，可接受）。
+		t.chat.appendSystem(colorize("Approve? "+msg.summary, ansiYellow))
+		t.picker = nil
+		t.confirm = &confirmDialog{summary: msg.summary, sel: 0, ch: msg.ch}
 		m.refreshChat()
 		return m, nil
 
 	case approvalCancelMsg:
-		if t.approvalCh == msg.ch {
-			t.approvalCh = nil
+		if t.confirm != nil && t.confirm.ch == msg.ch {
+			t.confirm = nil
 		}
 		return m, nil
 
@@ -197,6 +200,26 @@ func (m model) refreshChat() {
 // 弹窗打开时是模态：只响应弹窗键，其余按键（滚动/输入等）忽略。
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	t := m.t
+
+	// 确认弹窗打开时是模态：←/→ 循环选择，Enter 确认，Esc = Cancel。
+	if t.confirm != nil {
+		switch msg.String() {
+		case keyQuit:
+			// Ctrl+C 全局退出优先于模态弹窗（与 gocui 版全局绑定一致）
+			return m, tea.Quit
+		case keyLeft:
+			t.confirmMove(-1)
+		case keyRight:
+			t.confirmMove(1)
+		case keySubmit:
+			t.confirmConfirm()
+			m.refreshChat()
+		case keyCancel:
+			t.confirmCancel()
+			m.refreshChat()
+		}
+		return m, nil
+	}
 
 	if t.pickerOpen() {
 		switch msg.String() {
@@ -298,12 +321,6 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if msg == "" {
 		return m, nil
 	}
-	// 待确认的危险操作：输入 y/n 决策
-	if t.approvalCh != nil {
-		t.handleApproval(msg)
-		m.refreshChat()
-		return m, nil
-	}
 	// 首次配置引导：拦截输入走引导状态机
 	if t.setupState != setupNone {
 		cmd, _ := t.handleSetup(msg)
@@ -367,7 +384,7 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 	chatStr := m.vp.View()
-	if m.t.pickerOpen() {
+	if m.t.pickerOpen() || m.t.confirm != nil {
 		chatStr = m.overlayChat(chatStr)
 	} else if hints := m.commandHint(); len(hints) > 0 {
 		// 输入 / 开头的命令提示浮层（非模态，覆盖聊天区底部多行）
@@ -463,7 +480,13 @@ func (m model) overlayHint(chat string, hints []string) string {
 // 按行切分拼接（不触碰行内 ANSI 序列），总行数保持不变（H-7），
 // 避免超出屏幕高度被终端滚动截断（M0 实测约束）。
 func (m model) overlayChat(chat string) string {
-	box := m.t.renderPickerBox(m.width, m.height)
+	// 按当前打开的类型渲染弹窗（确认弹窗 / 列表弹窗互斥）
+	var box string
+	if m.t.confirm != nil {
+		box = m.t.renderConfirmBox(m.width, m.height)
+	} else {
+		box = m.t.renderPickerBox(m.width, m.height)
+	}
 	if box == "" {
 		return chat
 	}

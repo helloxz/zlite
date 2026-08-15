@@ -8,14 +8,14 @@ import (
 )
 
 // Approver 是 build 模式下危险操作（危险 shell 命令）的 TUI 确认实现：
-// 在聊天区展示确认请求，用户输入 y/n 决策。
+// 弹出居中确认弹窗（Allow / Deny / Cancel），←/→ 选择，Enter 确认。
 //
 // 写文件工具（write_file/edit_file/delete）按用户决策直接执行，不经过确认；
 // 仅 run_command 的危险命令（黑名单/危险模式）需要确认。
 //
-// 实现：program.Send 把请求投递进消息循环（线程安全），聊天区展示提示并
-// 置 pendingApproval；用户输入 y/n 由 submit 的 handleApproval 消费，
-// 决策经 channel 回传给阻塞中的 Request。
+// 实现：program.Send 把请求投递进消息循环（线程安全），消息循环打开确认
+// 弹窗（confirmDialog）；用户按键由 handleKey 的确认弹窗分支消费，决策经
+// channel 回传给阻塞中的 Request。
 type Approver struct {
 	t *TUI
 }
