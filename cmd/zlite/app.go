@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
+	"github.com/helloxz/zlite/internal/mcp"
 	"github.com/helloxz/zlite/internal/session"
 	"github.com/helloxz/zlite/internal/skills"
 	"github.com/helloxz/zlite/internal/tools"
@@ -37,6 +39,7 @@ type runtime struct {
 	cwd       string
 	mgr       *session.Manager
 	reg       *tools.Registry
+	mcpMgr    *mcp.Manager // nil 表示未启用 MCP
 	sk        *skills.Manager
 	sess      *session.Session
 	ag        *agent.Agent
@@ -116,6 +119,20 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	reg := tools.New(cwd, cfg.Shell.ConfirmCommands, cfg.Shell.PlanExtraCommands)
 	reg.Register(tools.ReadSkillTool(sk))
 
+	// MCP：加载 ~/.zlite/mcp/ 配置（同步解析，快）并在后台连接（不阻塞启动）；
+	// 工具在首轮对话前由 preRun（Attach）注册进注册表。
+	var mcpMgr *mcp.Manager
+	if cfg.MCP.Enabled {
+		mcpMgr = mcp.New(cfg.MCP.Dir, cfg.MCP.MaxServers, cfg.MCP.MaxToolsPerServer)
+		// 配置解析警告立即打印（TUI 尚未启动，stderr 安全）
+		for _, w := range mcpMgr.ConfigWarnings() {
+			fmt.Fprintln(os.Stderr, w)
+		}
+		if !opts.list {
+			mcpMgr.ConnectAsync() // 后台连接：本地 stdio 毫秒级，远程慢 server 不阻塞启动
+		}
+	}
+
 	// 会话
 	mgr := session.NewManager(filepath.Join(filepath.Dir(cfgPath), "sessions"))
 
@@ -130,7 +147,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 		approver = apUI
 	}
 
-	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: spec, cwd: cwd, mgr: mgr, reg: reg, sk: sk, apUI: apUI}
+	rt := &runtime{cfg: cfg, p: p, mode: mode, modelName: spec, cwd: cwd, mgr: mgr, reg: reg, mcpMgr: mcpMgr, sk: sk, apUI: apUI}
 	if opts.list || opts.acp {
 		return rt, nil // 列表模式不创建会话；ACP 模式会话按 NewSession 请求创建
 	}
@@ -149,6 +166,19 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	}
 	rt.sess = sess
 	rt.ag = agent.New(cfg, streamer, reg, sess, approver, cwd, mode, sk)
+	// MCP 工具注册：首轮对话前确保连接完成（Attach 幂等，每轮零开销），
+	// 连接警告经 agent 事件广播（TUI 展示为 system 消息）。
+	if mcpMgr != nil {
+		rt.ag.SetPreRun(func(ctx context.Context) error {
+			if err := mcpMgr.Attach(ctx, reg); err != nil {
+				return err
+			}
+			for _, w := range mcpMgr.TakeWarnings() {
+				rt.ag.Notify(w)
+			}
+			return nil
+		})
+	}
 	return rt, nil
 }
 
@@ -241,6 +271,10 @@ func runWithConfig(cfgPath string, opts options, cfg *config.Config) error {
 	if opts.list {
 		return listSessions(rt.mgr, rt.cwd)
 	}
+	// MCP 连接在两种模式下都要收尾（ACP 分支在 runACP 内阻塞至断开）
+	if rt.mcpMgr != nil {
+		defer rt.mcpMgr.Close() // 关闭 MCP 连接（终止 stdio 子进程）
+	}
 	if opts.acp {
 		return runACP(rt)
 	}
@@ -258,6 +292,7 @@ func runACP(rt *runtime) error {
 		Mgr:             rt.mgr,
 		GlobalSkillsDir: rt.sk.GlobalDir(),
 		AutoApprove:     rt.cfg.Agent.AutoApprove,
+		MCP:             rt.mcpMgr, // nil 时不启用 MCP（每个 ACP 会话注册到自己的注册表）
 	})
 	conn := acpsdk.NewAgentSideConnection(ap, os.Stdout, os.Stdin)
 	ap.Attach(conn)

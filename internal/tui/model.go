@@ -352,6 +352,8 @@ func (m model) handleAgentEvent(ev agent.Event) {
 	case agent.ThinkingStartEvent:
 		// 后端返回思维链：processing → thinking
 		t.chat.confirmThinking()
+	case agent.SystemNoticeEvent:
+		t.chat.appendSystem(e.Text)
 	case agent.DoneEvent:
 		t.status.setUsage(e.Usage)
 	}

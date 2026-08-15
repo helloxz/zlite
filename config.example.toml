@@ -92,3 +92,78 @@
   #   - 放行带写副作用参数的命令需谨慎：如 curl -o file 可写文件、curl -d @file 会上传
   #     本地文件内容、curl 可访问内网地址（localhost/云元数据），放行后由用户自担风险。
   plan_extra_commands = []
+
+# ============================ MCP 集成 ============================
+# 本节可选；不写则使用默认值。
+# MCP（Model Context Protocol）让模型调用第三方 server 提供的工具（地图、
+# GitHub、数据库等）。server 由第三方提供，zlite 只负责连接与调度。
+# 配置采用"一 server 一文件"：每个 server 一个 .toml 放在 [mcp].dir 目录
+# （缺省 ~/.zlite/mcp/），文件名即 server 名（如 github.toml → "github"），
+# 工具以 "<server>_<tool>" 前缀注册（如 github_get_file_contents）。
+
+[mcp]
+  # （可选）MCP 总开关。默认 true（设 false 可一键全关）。
+  enabled = true
+
+  # （可选）server 配置目录（支持 ~ 展开）。默认 "~/.zlite/mcp"。
+  # 目录不存在视为未配置 MCP，不影响启动。
+  dir = "~/.zlite/mcp"
+
+  # （可选）同时启用的 server 数量上限；超出按文件名顺序丢弃后面的并警告。
+  # 默认 5。工具注入过多会稀释模型的工具选择，建议保持小值。
+  max_servers = 5
+
+  # （可选）单个 server 注入的工具数量上限；超出丢弃并警告。默认 20。
+  # GitHub 等大工具集 server 建议用工具子集参数裁剪（见下方示例），
+  # 或调大本值（代价：上下文 token 占用与工具选择精度下降）。
+  max_tools_per_server = 20
+
+# ---- 单个 server 配置文件的字段说明（~/.zlite/mcp/<name>.toml）----
+#   transport = "stdio" | "http" | "sse"    # 缺省 stdio（本地子进程）
+#   command / args                          # stdio 必填：启动命令与参数（连接前预检可执行性）
+#   env = { KEY = "..." }                   # stdio 子进程附加环境变量（合并到当前进程环境）
+#   url / headers = { ... }                 # http/sse 必填 url；headers 可选请求头
+#   approve = "all" | "never"               # 缺省 "all"：每次工具调用需人工确认；"never" 信任直接执行
+#   modes = ["plan", "build"]               # 可见模式；缺省双模式均可见
+#   enabled = false                         # 可选：禁用该 server（等价于删除文件）
+#
+# env / headers 的值支持 ${VAR} 展开（与 api_key 不同：支持拼接，如
+# "Bearer ${TOKEN}"），变量来自 ~/.zlite/.env 或 shell 环境；变量缺失时
+# 该 server 跳过并警告。单个文件解析失败只跳过该 server，不影响其他。
+
+# ---- 示例 1：本地 stdio server（Node 生态，npx 启动，如高德地图）----
+# 需先安装 Node.js；首次 npx 启动会联网下载包（建议先手动跑一次预热：
+# npx -y @amap/amap-maps-mcp-server，看到下载完成后 Ctrl+C 退出）。
+# 文件 ~/.zlite/mcp/amap-maps.toml：
+#
+#   command = "npx"
+#   args = ["-y", "@amap/amap-maps-mcp-server"]
+#   env = { AMAP_MAPS_API_KEY = "${AMAP_MAPS_API_KEY}" }
+#
+# 对应 ~/.zlite/.env 中设置：
+#   AMAP_MAPS_API_KEY=你的高德Web服务key
+
+# ---- 示例 2：本地二进制 server（Go 实现，零运行时依赖，如 GitHub）----
+# 安装：go install github.com/github/github-mcp-server@latest
+# 文件 ~/.zlite/mcp/github.toml：
+#
+#   command = "github-mcp-server"
+#   args = ["stdio", "--toolsets", "repos,issues,pull_requests"]   # 裁剪工具子集
+#   env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_PAT}" }
+#
+# 对应 ~/.zlite/.env 中设置：
+#   GITHUB_PAT=github_pat_xxx
+# 只读模式：env 加 GITHUB_READ_ONLY = "1"。
+
+# ---- 示例 3：远程 http server（GitHub 官方托管端点）----
+# 无需本地安装任何运行时；需 GitHub PAT（授权范围按需，最小化）。
+# 文件 ~/.zlite/mcp/github-remote.toml：
+#
+#   transport = "http"
+#   url = "https://api.githubcopilot.com/mcp/"
+#   headers = {
+#     Authorization = "Bearer ${GITHUB_PAT}",
+#     "X-MCP-Toolsets" = "repos,issues,pull_requests",   # 可选：裁剪工具子集
+#   }
+#
+# 只读变体：url 用 https://api.githubcopilot.com/mcp/readonly。

@@ -77,8 +77,18 @@
 ## 3. 二期明确不做（防止范围蔓延）
 
 - Windows 支持（保持 Linux/macOS）
-- MCP server 集成（goai 有 mcp client，但接入排在二期之后，作为三期候选）
 - 多 agent / 子代理编排
 - 会话加密、团队共享
 - 图形化 diff（终端内字符级 diff 可视化为可选增强）
+
+## 4. MCP server 集成（已实现，2026-08）
+
+- 配置：`config.toml` 的 `[mcp]` 段（`enabled` / `dir` / `max_servers` / `max_tools_per_server`），
+  server 一文件放 `~/.zlite/mcp/<name>.toml`（文件名即 server 名）
+- transport：stdio / http / sse；`env`、`headers` 支持 `${VAR}` 展开（含串内拼接）
+- 权限：`approve = "all"`（缺省，每次调用经 Approver 确认）| `never`；双模式（plan/build）可见
+- 生命周期：后台并行连接不阻塞启动，首轮对话前 `Attach` 幂等注册工具（`<server>_<tool>` 前缀），
+  单 server 失败降级为警告（TUI system 消息）；退出统一 Close（终止 stdio 子进程）
+- 限制：`max_servers = 5`（缺省）、`max_tools_per_server = 20`（缺省），超出按文件名顺序丢弃并警告
+- 一期不做：远程 OAuth、动态工具刷新（list_changed）、项目级 mcp 目录叠加、懒加载
 

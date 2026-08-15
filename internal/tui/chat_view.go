@@ -15,10 +15,14 @@ import (
 //	"thinking" = 后端返回了思维链（切换为 [thinking...]）；
 //	"done" = 本轮生成结束（显示 [done]）；"" = 无状态或历史消息。
 //	标记只存在于显示层，不落盘、历史恢复时不出现。
+//
+// callID 是工具调用的调用 ID（仅 tool 行用，用于并行工具调用时按 ID 匹配
+// 完成状态；历史恢复的工具行无 callID）。
 type entry struct {
 	kind     string // user | assistant | tool | system
 	text     string
 	thinking string
+	callID   string
 }
 
 // chatView 是消息历史的纯状态模型：只维护 entries 与滚动跟随状态，
@@ -86,13 +90,14 @@ func (c *chatView) finishProcessing() {
 // appendToolCall 追加工具调用行（待完成状态）。
 func (c *chatView) appendToolCall(e agent.ToolCallEvent) {
 	summary := compactInput(e.Input)
-	c.entries = append(c.entries, entry{kind: "tool", text: "  [tool] " + e.Name + summary + " ..."})
+	c.entries = append(c.entries, entry{kind: "tool", text: "  [tool] " + e.Name + summary + " ...", callID: e.CallID})
 }
 
-// finishToolCall 更新最后一条工具行状态（[ok] / [fail]）。
+// finishToolCall 按调用 ID 更新对应工具行状态（[ok] / [fail]）。
+// 并行工具调用按 CallID 精确匹配，避免完成顺序不同导致状态挂错行。
 func (c *chatView) finishToolCall(e agent.ToolResultEvent) {
 	for i := len(c.entries) - 1; i >= 0; i-- {
-		if c.entries[i].kind == "tool" && strings.HasSuffix(c.entries[i].text, " ...") {
+		if c.entries[i].kind == "tool" && c.entries[i].callID == e.CallID {
 			mark := colorize("[ok]", ansiGreen)
 			if e.Error {
 				mark = colorize("[fail]", ansiRed)

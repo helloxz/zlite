@@ -75,6 +75,16 @@ func (r *Registry) Register(t Tool) {
 	r.register(t)
 }
 
+// Has 判断工具名是否已注册（MCP 工具注册前的重名检查）。
+func (r *Registry) Has(name string) bool {
+	for _, t := range r.tools {
+		if t.GoAITool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ForMode 返回指定模式下可见的 goai 工具列表（直接供 llm.StreamRequest.Tools 使用）。
 func (r *Registry) ForMode(m Mode) []goai.Tool {
 	out := make([]goai.Tool, 0, len(r.tools))

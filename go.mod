@@ -10,6 +10,7 @@ require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/cybergodev/html v1.4.7
 	github.com/joho/godotenv v1.5.1
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/viper v1.21.0
 	github.com/zendev-sh/goai v0.9.0
 	go.yaml.in/yaml/v3 v3.0.4
@@ -34,7 +35,6 @@ require (
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
@@ -44,6 +44,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )

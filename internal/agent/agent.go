@@ -42,6 +42,14 @@ type Agent struct {
 	thinking string
 
 	events chan Event
+	// preRun 是每轮生成开始前的回调（如 MCP 连接与工具注册）。
+	// 由调用方注入；应自行保证幂等（每轮都会调用）；nil 表示跳过。
+	preRun func(ctx context.Context) error
+	// approvalMu 串行化权限确认：goai 对并行工具调用（executeToolsParallel）
+	// 并发触发多个 onBeforeToolExecute，而确认器实现（如 TUI 单通道弹窗）
+	// 通常只支持一个挂起请求——并发会互相覆盖导致确认永久阻塞。
+	// 加锁后一次只弹一个确认，其余工具调用等待。
+	approvalMu sync.Mutex
 }
 
 // New 创建 Agent。
@@ -118,6 +126,17 @@ func (a *Agent) SetMode(m Mode) {
 	a.mode = m
 	a.sess.AppendMeta("mode_change", string(m))
 	a.emit(ModeChangeEvent{Mode: m})
+}
+
+// SetPreRun 设置每轮生成开始前的回调（如 MCP 连接与工具注册，要求幂等）。
+// 回调在每次 runOnce 开头调用，失败中止本轮生成；nil 清除回调。
+func (a *Agent) SetPreRun(fn func(ctx context.Context) error) {
+	a.preRun = fn
+}
+
+// Notify 广播一条系统提示（TUI 展示为 system 消息；ACP 翻译器忽略）。
+func (a *Agent) Notify(text string) {
+	a.emit(SystemNoticeEvent{Text: text})
 }
 
 // History 返回当前会话的模型消息历史（/sessions 切换会话后 UI 渲染用）。
@@ -253,6 +272,12 @@ func (a *Agent) skillDescriptions() []string {
 // runOnce 是核心生成循环（Run/RunInit 共用）：截断 → 组装请求 → StreamText
 // → 事件 → 落盘。用户消息须已由调用方 AppendUser。
 func (a *Agent) runOnce(ctx context.Context, system string) error {
+	// 每轮前置回调（如 MCP 连接与工具注册，调用方保证幂等）：失败中止本轮
+	if a.preRun != nil {
+		if err := a.preRun(ctx); err != nil {
+			return err
+		}
+	}
 	// 上下文截断（按轮次：超过 defaultMaxHistoryTurns 轮才丢弃最早整轮）
 	all := a.sess.ToMessages()
 	history := truncateMessages(all, defaultMaxHistoryTurns)
@@ -337,7 +362,13 @@ func (a *Agent) onToolCall(tc llm.ToolCall) {
 
 // onBeforeToolExecute 是工具执行前的权限确认拦截点。
 // 拒绝时工具不执行，拒绝原因作为工具结果返回给模型（模型可调整方案）。
+//
+// 注意：goai 并行执行工具调用时会并发进入本函数；确认器只支持单个挂起
+// 请求，必须串行化（approvalMu）——否则并发确认互相覆盖导致永久阻塞。
 func (a *Agent) onBeforeToolExecute(info llm.BeforeToolExecuteInfo) llm.BeforeToolExecuteResult {
+	a.approvalMu.Lock()
+	defer a.approvalMu.Unlock()
+
 	need, summary := a.registry.NeedApproveFor(info.Name, info.Input)
 	if !need {
 		return llm.BeforeToolExecuteResult{}

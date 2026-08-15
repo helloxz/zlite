@@ -48,6 +48,7 @@ type Config struct {
 	Providers []Provider `mapstructure:"providers"`
 	Agent     AgentCfg   `mapstructure:"agent"`
 	Shell     ShellCfg   `mapstructure:"shell"`
+	MCP       MCPCfg     `mapstructure:"mcp"`
 }
 
 // Provider 描述一个模型渠道。
@@ -92,6 +93,12 @@ func DefaultConfig() *Config {
 			LoadAgentsMD: true,
 		},
 		Shell: ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
+		MCP: MCPCfg{
+			Dir:               DefaultMCPDir,
+			Enabled:           true,
+			MaxServers:        DefaultMaxMCPServers,
+			MaxToolsPerServer: DefaultMaxToolsPerServer,
+		},
 	}
 }
 
@@ -298,6 +305,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.default_model: %w", err)
 		}
 	}
+	// MCP 段：数量上限须为正整数
+	if c.MCP.MaxServers <= 0 {
+		return fmt.Errorf("mcp.max_servers must be positive, got %d", c.MCP.MaxServers)
+	}
+	if c.MCP.MaxToolsPerServer <= 0 {
+		return fmt.Errorf("mcp.max_tools_per_server must be positive, got %d", c.MCP.MaxToolsPerServer)
+	}
 	return nil
 }
 
@@ -458,6 +472,26 @@ func WriteTemplate(path string) error {
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
   plan_extra_commands = []       # plan 模式额外放行命令（与内置只读白名单合并、去重）
+
+[mcp]
+  enabled = true                  # MCP 总开关
+  dir = "~/.zlite/mcp"            # MCP server 配置目录（一 server 一个 toml 文件）
+  max_servers = 5                 # 同时启用上限（超出按文件名顺序丢弃并警告）
+  max_tools_per_server = 20       # 单个 server 注入工具数上限
+
+# MCP server 配置放在 ~/.zlite/mcp/ 下，一 server 一个 toml 文件（文件名即 server 名），例如：
+#
+#   # ~/.zlite/mcp/github.toml
+#   transport = "stdio"                        # stdio | http | sse（缺省 stdio）
+#   command = "npx"                           # stdio 必填
+#   args = ["-y", "@modelcontextprotocol/server-github"]
+#   env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }   # 支持 ${ENV} 引用
+#   approve = "all"                           # all（每次调用需确认）| never（信任）
+#
+#   # ~/.zlite/mcp/remote.toml
+#   transport = "http"                        # http | sse 需配置 url
+#   url = "https://mcp.example.com"
+#   headers = { Authorization = "Bearer ${TOKEN}" }
 `
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

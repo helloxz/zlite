@@ -22,6 +22,7 @@ import (
 	"github.com/helloxz/zlite/internal/agent"
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
+	"github.com/helloxz/zlite/internal/mcp"
 	"github.com/helloxz/zlite/internal/session"
 	"github.com/helloxz/zlite/internal/skills"
 	"github.com/helloxz/zlite/internal/tools"
@@ -55,6 +56,9 @@ type Options struct {
 	// 项目 skills 目录按各会话的 cwd 动态构建。为空时不启用 skills。
 	GlobalSkillsDir string
 	AutoApprove     bool // 信任模式：跳过权限确认
+	// MCP 是共享的 MCP 管理器（nil 时不启用）；每个 ACP 会话的 agent
+	// 在首轮生成前把 MCP 工具注册进该会话自己的注册表（Attach 幂等）。
+	MCP *mcp.Manager
 	// Streamer 覆盖默认模型流（测试注入 fake 用；nil 时按 Cfg 构建）。
 	Streamer llm.Streamer
 }
@@ -504,6 +508,18 @@ func (a *Agent) newSessionState(zs *session.Session, model, cwd string) *session
 		sk = skm
 	}
 	ag := agent.New(a.opts.Cfg, streamer, reg, zs, approver, cwd, agent.Mode(zs.Mode), sk)
+	// MCP 工具注册：首轮生成前确保连接完成并注册进本会话注册表
+	if a.opts.MCP != nil {
+		ag.SetPreRun(func(ctx context.Context) error {
+			if err := a.opts.MCP.Attach(ctx, reg); err != nil {
+				return err
+			}
+			for _, w := range a.opts.MCP.TakeWarnings() {
+				ag.Notify(w)
+			}
+			return nil
+		})
+	}
 	st := &sessionState{
 		sid:   acpsdk.SessionId(zs.ID),
 		zs:    zs,

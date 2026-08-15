@@ -53,6 +53,14 @@ type ApprovalRequest struct {
 	Input   map[string]any
 }
 
+// SystemNoticeEvent 是系统级提示（如 MCP 连接警告），
+// TUI 展示为 system 消息；ACP 翻译器不匹配则静默忽略。
+type SystemNoticeEvent struct {
+	Text string
+}
+
+func (SystemNoticeEvent) isEvent() {}
+
 func (TextDeltaEvent) isEvent()      {}
 func (TextDoneEvent) isEvent()       {}
 func (ToolCallEvent) isEvent()       {}
