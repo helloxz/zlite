@@ -35,18 +35,19 @@ irm https://raw.githubusercontent.com/helloxz/zlite/main/install.ps1 | iex
 
 ### 初始化
 
-执行`zlite`根据提示填写 OpenAI 兼容模型信息。
+安装完毕后执行`zlite`根据提示填写 OpenAI 兼容模型信息。
 
 ### 指令和快捷键
 
 * `/init`：初始化项目
-* `/new`：新建对话，快捷键`Ctrl + N`
-* 切换模式：快捷键`Tab`
-* `/switch`：切换模型：快捷键`Shift + Tab`
-* `/sessions`：切换对话，快捷键`Ctrl + L`
-* `/thinking`：思考强度切换，快捷键`Ctrl + T`
-* `/exit`：退出TUI终端，快捷键`Ctrl + C`
-* 聊天区滚动：`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到顶部/底部
+* `/new`：新建对话，快捷键 `Ctrl + N`
+* `/sessions`：切换历史对话，快捷键 `Ctrl + L`
+* `/switch`：切换模型，快捷键 `Shift + Tab`
+* `/thinking`：切换思考强度，快捷键 `Ctrl + T`
+* `/compress`：压缩上下文（对话超过 10 轮后可用）
+* `/exit`：退出 TUI 终端，快捷键 `Ctrl + C`
+* 切换 plan / build 模式：快捷键 `Tab`
+* 聊天区滚动：`PgUp` / `PgDn` 翻页，`Home` / `End` 跳到顶部 / 底部
 
 ### 一键更新
 
