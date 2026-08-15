@@ -120,6 +120,7 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 		ConfirmCommands:   cfg.Shell.ConfirmCommands,
 		PlanExtraCommands: cfg.Shell.PlanExtraCommands,
 		WebSearch:         cfg.Tools.WebSearch,
+		WebFetch:          cfg.Tools.WebFetch,
 	})
 	reg.Register(tools.ReadSkillTool(sk))
 

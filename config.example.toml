@@ -93,5 +93,6 @@ max_tools_per_server = 20
 
 
 [tools]
-# 联网搜索，默认启用，不需要请改为 false
+# 联网搜索 / 网页抓取，默认启用，不需要请改为 false
 web_search = true   
+web_fetch = true

@@ -50,17 +50,21 @@ type Options struct {
 	PlanExtraCommands []string
 	// WebSearch 是否注册 web_search 工具（由上层按 config [tools] 段传入）。
 	WebSearch bool
+	// WebFetch 是否注册 web_fetch 工具（由上层按 config [tools] 段传入）。
+	WebFetch bool
 }
 
 // New 创建注册表并注册内置工具。
 // cwd 是工具执行的基准目录；opts 携带危险命令清单、plan 只读白名单追加项
-// 与 web_search 开关（false 时不注册该工具，plan/build 均不可见）。
+// 与 web_search / web_fetch 开关（false 时不注册对应工具，plan/build 均不可见）。
 func New(cwd string, opts Options) *Registry {
 	r := &Registry{cwd: cwd, confirm: opts.ConfirmCommands}
 	r.register(readFileTool(cwd))
 	r.register(grepTool(cwd))
 	r.register(globTool(cwd))
-	r.register(webFetchTool())
+	if opts.WebFetch {
+		r.register(webFetchTool())
+	}
 	if opts.WebSearch {
 		r.register(webSearchTool())
 	}

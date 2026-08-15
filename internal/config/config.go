@@ -89,6 +89,9 @@ type ToolsCfg struct {
 	// WebSearch 是否启用 web_search 联网搜索工具（默认启用；
 	// false 时不注册，模型无法调用联网搜索）。
 	WebSearch bool `mapstructure:"web_search"`
+	// WebFetch 是否启用 web_fetch 网页抓取工具（默认启用；
+	// false 时不注册，模型无法抓取网页内容）。
+	WebFetch bool `mapstructure:"web_fetch"`
 }
 
 // DefaultConfig 返回带默认值的配置。
@@ -101,7 +104,7 @@ func DefaultConfig() *Config {
 			LoadAgentsMD: true,
 		},
 		Shell: ShellCfg{ConfirmCommands: append([]string(nil), defaultConfirmCommands...)},
-		Tools: ToolsCfg{WebSearch: true}, // web_search 默认启用
+		Tools: ToolsCfg{WebSearch: true, WebFetch: true}, // web_search/web_fetch 默认启用
 		MCP: MCPCfg{
 			File:              DefaultMCPFile,
 			Enabled:           true,
@@ -484,6 +487,7 @@ func WriteTemplate(path string) error {
 
 [tools]
   web_search = true              # 启用 web_search 联网搜索工具（Tavily，默认启用）；不需要联网时改为 false
+  web_fetch = true               # 启用 web_fetch 网页抓取工具（默认启用）；不需要时改为 false
 
 [mcp]
   enabled = true                  # MCP 总开关

@@ -72,6 +72,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 [tools]
   web_search = true # 启用 web_search 联网搜索工具（Tavily）；不需要联网时改为 false
+  web_fetch = true  # 启用 web_fetch 网页抓取工具；不需要时改为 false
 ```
 
 ## 配置项速查表
@@ -91,6 +92,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 | `shell.confirm_commands` | string[] | 见模板 | 需确认的命令前缀 |
 | `shell.plan_extra_commands` | string[] | `[]` | plan 模式额外放行命令名（与内置白名单合并去重） |
 | `tools.web_search` | bool | `true` | 启用 web_search 联网搜索工具（Tavily）；`false` 时不注册，模型无法联网搜索 |
+| `tools.web_fetch` | bool | `true` | 启用 web_fetch 网页抓取工具；`false` 时不注册，模型无法抓取网页内容 |
 
 ## 示例：多渠道 + Anthropic + 默认模型
 

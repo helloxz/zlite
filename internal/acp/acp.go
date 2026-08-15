@@ -498,6 +498,7 @@ func (a *Agent) newSessionState(zs *session.Session, model, cwd string) *session
 		ConfirmCommands:   a.opts.Cfg.Shell.ConfirmCommands,
 		PlanExtraCommands: a.opts.Cfg.Shell.PlanExtraCommands,
 		WebSearch:         a.opts.Cfg.Tools.WebSearch,
+		WebFetch:          a.opts.Cfg.Tools.WebFetch,
 	})
 	// skills 按会话 cwd 构建：项目 skills 目录 <cwd>/.zlite/skills/，
 	// 全局目录不变；GlobalSkillsDir 为空时不启用 skills

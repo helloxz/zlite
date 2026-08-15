@@ -3,3 +3,4 @@
 * 新增：mcp工具调用
 * 优化：tui问询交互
 * 新增：支持关闭web_search
+* 新增：支持关闭web_fetch
