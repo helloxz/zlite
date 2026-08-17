@@ -26,6 +26,13 @@ var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, ".zlite": true,
 }
 
+// isSensitiveEnvFile 判断路径是否指向 .env 敏感文件（.env 及 .env.*，如 .env.local）。
+// 这类文件通常含密钥等敏感信息，read_file/grep 一律拒绝访问。
+func isSensitiveEnvFile(p string) bool {
+	name := filepath.Base(p)
+	return name == ".env" || strings.HasPrefix(name, ".env.")
+}
+
 // ---- read_file ----
 
 type readFileInput struct {
@@ -42,6 +49,9 @@ func readFileTool(cwd string) Tool {
 					return "", fmt.Errorf("path 不能为空")
 				}
 				p := resolvePath(cwd, in.Path)
+				if isSensitiveEnvFile(p) {
+					return "", fmt.Errorf("拒绝读取 %s：.env 文件包含密钥等敏感信息，禁止访问", p)
+				}
 				f, err := os.Open(p)
 				if err != nil {
 					return "", err
@@ -163,6 +173,10 @@ func grepTool(cwd string) Tool {
 
 // grepFile 搜索单个文件，把匹配写入 b；返回累计匹配数。
 func grepFile(p string, re *regexp.Regexp, b *strings.Builder, count int) int {
+	// .env 敏感文件（含密钥）不参与内容搜索，防止匹配行内容泄露
+	if isSensitiveEnvFile(p) {
+		return count
+	}
 	f, err := os.Open(p)
 	if err != nil {
 		return count

@@ -28,6 +28,9 @@ func writeFileTool(cwd string) Tool {
 					return "", fmt.Errorf("path 不能为空")
 				}
 				p := resolvePath(cwd, in.Path)
+				if isSensitiveEnvFile(p) {
+					return "", fmt.Errorf("拒绝写入 %s：.env 文件包含密钥等敏感信息，禁止访问", p)
+				}
 				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 					return "", fmt.Errorf("创建父目录失败: %w", err)
 				}
@@ -56,6 +59,9 @@ func editFileTool(cwd string) Tool {
 					return "", fmt.Errorf("path 与 old_string 不能为空")
 				}
 				p := resolvePath(cwd, in.Path)
+				if isSensitiveEnvFile(p) {
+					return "", fmt.Errorf("拒绝修改 %s：.env 文件包含密钥等敏感信息，禁止访问", p)
+				}
 				data, err := os.ReadFile(p)
 				if err != nil {
 					return "", err
@@ -92,6 +98,9 @@ func deleteTool(cwd string) Tool {
 					return "", fmt.Errorf("path 不能为空")
 				}
 				p := resolvePath(cwd, in.Path)
+				if isSensitiveEnvFile(p) {
+					return "", fmt.Errorf("拒绝删除 %s：.env 文件包含密钥等敏感信息，禁止访问", p)
+				}
 				info, err := os.Stat(p)
 				if err != nil {
 					return "", err
