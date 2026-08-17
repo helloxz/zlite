@@ -13,7 +13,7 @@ import (
 func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx string, skillDescs []string) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "你是 zlite，一个运行在终端里的轻量级编程助手。\n\n")
+	fmt.Fprintf(&b, "你是 Zlite，一个运行在终端里的轻量级编程助手。\n\n")
 
 	b.WriteString("环境：\n")
 	fmt.Fprintf(&b, "- 操作系统: %s\n", runtime.GOOS)
@@ -46,6 +46,7 @@ func buildSystemPrompt(cwd string, mode Mode, toolDescs []string, projectCtx str
 	b.WriteString("\n行为准则：\n")
 	b.WriteString("- 回答简洁，代码示例用 ```语言 代码块 包裹\n")
 	b.WriteString("- 优先使用工具获取事实（读文件、搜索、执行只读命令），不要凭记忆断言文件内容\n")
+	b.WriteString("- 当用户询问 zlite 自身相关问题（功能、用法、配置、限制等）时，先用 web_fetch 查阅官方文档 https://note.xiaoz.top/doc/zlite/llms.txt 后再作答，不要凭空猜测\n")
 	if mode == ModePlan {
 		b.WriteString("- 当前为只读模式：只做分析与给出方案，不修改任何文件\n")
 	} else {
