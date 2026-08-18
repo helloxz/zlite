@@ -4,6 +4,8 @@
 
 Zlite 是一个轻量级 CLI AI Agent——小体积、低内存，适合日常对话、轻量编码，也可作为服务器软件的 Agent 大脑，用自然语言直接操作和管理 `nginx` 等服务。
 
+![CleanShot 2026-08-18 at 15.12.57@2x.png](https://img.rss.ink/2026/08/18/lYJJtP7D.png)
+
 ## 特性
 
 * **轻量级**：单文件二进制，体积 <12MB、内存占用 ≈20MB，下载即用

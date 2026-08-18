@@ -4,6 +4,9 @@
 
 Zlite is a lightweight CLI AI agent — small footprint, low memory usage. It's great for everyday conversations and light coding, and can also act as the agent brain for server software, letting you operate and manage services like `nginx` directly through natural language.
 
+![CleanShot 2026-08-18 at 15.12.57@2x.png](https://img.rss.ink/2026/08/18/lYJJtP7D.png)
+
+
 ## Features
 
 * **Lightweight**: single-file binary, <12MB in size and ≈20MB memory usage, ready to use after download
