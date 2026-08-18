@@ -33,11 +33,26 @@ type ToolCall struct {
 	Input map[string]any
 }
 
+// Image 是 user 消息附带的图片（@ 引用）。
+// Data 为完整的 data URI（"data:<media_type>;base64,..."），仅内存态：
+// 会话持久化只保存 Path/MediaType，Data 由 agent 层组装消息时从文件读取填充。
+type Image struct {
+	// Path 是图片的绝对路径（会话记录与恢复重读的依据）。
+	Path string
+	// MediaType 是图片 MIME 类型（image/png、image/jpeg 等）。
+	MediaType string
+	// Data 是 base64 data URI；为空表示未加载（见 hydrateImages）或加载失败
+	// （ToProviderMessages 会跳过空 Data 的图片，避免发非法 part）。
+	Data string
+}
+
 // Message 是一条对话消息（会话历史与模型之间的中间表示）。
 type Message struct {
 	Role Role
 	// Content: user/assistant 的文本；tool 消息的工具输出。
 	Content string
+	// Images: user 消息附带的图片（@ 引用；assistant/tool 消息恒为空）。
+	Images []Image
 	// ToolCalls: assistant 消息附带的工具调用（仅恢复历史时使用，
 	// 工具循环过程中由 SDK 内部维护）。
 	ToolCalls []ToolCall
@@ -184,13 +199,36 @@ func BuildModelSpec(cfg *config.Config, spec string) (*Model, error) {
 }
 
 // ToProviderMessages 把 zlite 消息转换为 goai provider 消息。
-// 历史恢复时 assistant 消息可携带 ToolCalls（转为 tool-call parts）。
+// 历史恢复时 assistant 消息可携带 ToolCalls（转为 tool-call parts）；
+// user 消息可携带 Images（转为 image parts，文本与图片同消息共存）。
 func ToProviderMessages(msgs []Message) []provider.Message {
 	out := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
 		case RoleUser:
-			out = append(out, goai.UserMessage(m.Content))
+			// 手工构造 parts（与 goai.UserMessage 的 [{PartText}] 等价）：
+			// 图片与文本以 parts 数组形式共存于同一条 user 消息。
+			// 纯文本消息走此路径行为不变（见 llm_test 等价性用例）。
+			parts := make([]provider.Part, 0, 1+len(m.Images))
+			if m.Content != "" {
+				parts = append(parts, provider.Part{Type: provider.PartText, Text: m.Content})
+			}
+			for _, img := range m.Images {
+				// Data 为空（图片重读失败被丢弃）时跳过，避免发送非法 part；
+				// 文本 part 仍保留，模型可见消息整体。
+				if img.Data == "" {
+					continue
+				}
+				parts = append(parts, provider.Part{
+					Type:      provider.PartImage,
+					URL:       img.Data,
+					MediaType: img.MediaType,
+				})
+			}
+			if len(parts) == 0 {
+				parts = append(parts, provider.Part{Type: provider.PartText, Text: ""})
+			}
+			out = append(out, provider.Message{Role: provider.RoleUser, Content: parts})
 		case RoleAssistant:
 			if len(m.ToolCalls) == 0 {
 				out = append(out, goai.AssistantMessage(m.Content))

@@ -64,6 +64,22 @@ func countTurns(msgs []llm.Message) int {
 func (a *Agent) buildHistory(noteTruncation bool) []llm.Message {
 	all := a.sess.ToMessages()
 	history := truncateMessages(all, defaultMaxHistoryTurns)
+	// 图片数据组装：先截断再重读文件（被截断丢弃的早期图片不必读）。
+	// 当轮新注入的图片与历史恢复的图片统一在此重读并编码 base64，
+	// llm 层不感知文件 IO，会话记录只存路径。
+	history = hydrateImages(history)
+	// 合并当轮外部注入的图片（ACP image block，无本地文件、不持久化）
+	// 到最后一条 user 消息：这些图片只存在于本函数组装出的内存序列中。
+	// finalizeTurn（工具步数耗尽收尾）同样调用本函数，图片随消息序列
+	// 进入收尾请求——同一轮上下文一致，无副作用。
+	if len(a.pendingImages) > 0 {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == llm.RoleUser {
+				history[i].Images = append(history[i].Images, a.pendingImages...)
+				break
+			}
+		}
+	}
 	if noteTruncation && countTurns(history) != countTurns(all) {
 		a.sess.AppendMeta("context_truncated", truncationNote(countTurns(all), countTurns(history)))
 	}

@@ -14,17 +14,26 @@ const (
 	TypeMeta       = "meta"
 )
 
+// ImageRef 是 user 消息附带的图片引用（jsonl 持久化形态）。
+// 只存绝对路径与 MIME 类型：不存 base64 数据（避免体积膨胀），
+// 恢复时由 agent 层按 Path 重读文件组装（buildHistory 的 hydrateImages）。
+type ImageRef struct {
+	Path      string `json:"path"`
+	MediaType string `json:"media_type,omitempty"`
+}
+
 // Record 是 jsonl 中的一行记录。
 // 所有类型共用一个结构，由 Type 字段区分；各类型只使用相关字段（见 design.md §2.1）。
 type Record struct {
 	Type string `json:"type"`
 
 	// message 记录
-	ID        string `json:"id,omitempty"`
-	Role      string `json:"role,omitempty"` // user | assistant
-	Content   string `json:"content,omitempty"`
-	Reasoning string `json:"reasoning,omitempty"` // assistant 的思考内容（思维链，仅展示用，不进模型上下文）
-	Usage     *Usage `json:"usage,omitempty"`     // assistant 消息的 token 用量
+	ID        string     `json:"id,omitempty"`
+	Role      string     `json:"role,omitempty"` // user | assistant
+	Content   string     `json:"content,omitempty"`
+	Images    []ImageRef `json:"images,omitempty"`    // user 消息的图片引用（@ 引用）
+	Reasoning string     `json:"reasoning,omitempty"` // assistant 的思考内容（思维链，仅展示用，不进模型上下文）
+	Usage     *Usage     `json:"usage,omitempty"`     // assistant 消息的 token 用量
 
 	// tool_call / tool_result 记录（按 CallID 配对）
 	CallID     string         `json:"call_id,omitempty"`

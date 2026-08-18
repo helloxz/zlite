@@ -42,6 +42,11 @@ type Agent struct {
 	thinking string
 
 	events chan Event
+	// pendingImages 是当轮外部注入的图片（如 ACP 协议的 image content block：
+	// 无本地文件、不持久化，当轮有效）：RunWithImages 设置，runOnce 的
+	// buildHistory 消费后清空。调用方保证同步串行（TUI busy 锁 / ACP
+	// waitIdle），无需额外加锁。
+	pendingImages []llm.Image
 	// preRun 是每轮生成开始前的回调（如 MCP 连接与工具注册）。
 	// 由调用方注入；应自行保证幂等（每轮都会调用）；nil 表示跳过。
 	preRun func(ctx context.Context) error
@@ -156,7 +161,25 @@ func (a *Agent) MaxTurns() int {
 
 // Run 执行一轮对话：追加用户消息 → 模型生成（含工具循环）→ 落盘。
 func (a *Agent) Run(ctx context.Context, userMsg string) error {
-	if strings.TrimSpace(userMsg) == "" {
+	return a.run(ctx, userMsg, nil)
+}
+
+// RunWithImages 执行一轮对话并附加外部提供的图片（ACP 等协议通道的
+// image content block）。
+//
+// 与 Run 的差异：图片以内存 data URI 形式进入模型上下文，**不写入会话文件**
+// （当轮有效，会话恢复后不可重放，需用户重新引用）；而 Run 的文本 @ 引用
+// 走"存绝对路径 → 恢复时重读"的持久化语义（见 parseImageMentions）。
+func (a *Agent) RunWithImages(ctx context.Context, userMsg string, images []llm.Image) error {
+	return a.run(ctx, userMsg, images)
+}
+
+// run 是 Run / RunWithImages 的共同实现。
+// extImages 为外部注入的当轮图片（无本地文件，nil 表示纯文本消息）。
+func (a *Agent) run(ctx context.Context, userMsg string, extImages []llm.Image) error {
+	// 空文本仅在携带外部图片时放行（ACP 客户端可能发纯图 prompt）：
+	// 纯文本空消息仍拒绝。
+	if strings.TrimSpace(userMsg) == "" && len(extImages) == 0 {
 		return errors.New("消息不能为空")
 	}
 	// 轮次上限：达到 maxConversationTurns 轮后拒绝继续对话。
@@ -164,9 +187,24 @@ func (a *Agent) Run(ctx context.Context, userMsg string) error {
 	if countTurns(a.sess.ToMessages()) >= maxConversationTurns {
 		return fmt.Errorf("Conversation limit reached: this session has exceeded %d turns. Response quality degrades on very long sessions. Start a new session with /new.", maxConversationTurns)
 	}
-	if err := a.sess.AppendUser(userMsg); err != nil {
+	// @ 图片引用解析：命中图片则剥离 token 并注入图片；非图片引用
+	// （文本文件/目录/不存在等）一律不消费、原样保留，交由模型自行判断
+	// （如调用 read_file 读取）。图片引用失败（读取失败/超限）时中止本轮，
+	// 不写会话——用户明确指向的图片必须可读，静默会误导模型。
+	text, imgs, err := parseImageMentions(a.cwd, userMsg)
+	if err != nil {
+		return err
+	}
+	if err := a.sess.AppendUser(text, imgs...); err != nil {
 		return fmt.Errorf("保存用户消息失败: %w", err)
 	}
+	for _, img := range imgs {
+		a.emit(SystemNoticeEvent{Text: "Attached image: " + img.Path})
+	}
+	// 外部注入图片（无本地文件）：当轮暂存，buildHistory 组装请求时合并
+	// 到最后一条 user 消息；runOnce 返回后清空（本轮生命周期结束）。
+	a.pendingImages = extImages
+	defer func() { a.pendingImages = nil }()
 	return a.runOnce(ctx, a.buildPrompt())
 }
 

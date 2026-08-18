@@ -95,9 +95,10 @@ func (s *Session) syncMeta(updatedAt string) {
 }
 
 // AppendUser 记录用户消息。
+// imgs 为该消息附带的图片引用（@ 引用；可空）。
 // 首条用户消息时自动生成会话标题（截取内容前段）并以 meta 记录落盘；
 // meta 写入成功后才更新内存状态，失败时调用方重试不会丢标题。
-func (s *Session) AppendUser(content string) error {
+func (s *Session) AppendUser(content string, imgs ...ImageRef) error {
 	if !s.titleSet {
 		title := extractTitle(content)
 		if err := s.AppendMeta(metaTitleEvent, title); err != nil {
@@ -106,7 +107,7 @@ func (s *Session) AppendUser(content string) error {
 		s.Title = title
 		s.titleSet = true
 	}
-	return s.Append(Record{Type: TypeMessage, Role: "user", Content: content})
+	return s.Append(Record{Type: TypeMessage, Role: "user", Content: content, Images: imgs})
 }
 
 // extractTitle 从首条用户消息提取会话标题：去除首尾空白后取前
@@ -176,7 +177,13 @@ func (s *Session) ToMessages() []llm.Message {
 		switch r.Type {
 		case TypeMessage:
 			if r.Role == "user" {
-				out = append(out, llm.Message{Role: llm.RoleUser, Content: r.Content})
+				// 恢复图片引用：只带 Path/MediaType（Data 空），
+				// base64 由 agent 层 buildHistory 重读文件组装（hydrateImages）。
+				imgs := make([]llm.Image, 0, len(r.Images))
+				for _, ir := range r.Images {
+					imgs = append(imgs, llm.Image{Path: ir.Path, MediaType: ir.MediaType})
+				}
+				out = append(out, llm.Message{Role: llm.RoleUser, Content: r.Content, Images: imgs})
 			} else if r.Role == "assistant" {
 				out = append(out, llm.Message{Role: llm.RoleAssistant, Content: r.Content})
 			}

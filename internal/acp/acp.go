@@ -8,10 +8,14 @@ package acp
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -114,6 +118,10 @@ func (a *Agent) Initialize(ctx context.Context, params acpsdk.InitializeRequest)
 		},
 		AgentCapabilities: acpsdk.AgentCapabilities{
 			LoadSession: true,
+			// 宣告支持 prompt 中的图片块（ContentBlock::Image）：协议要求
+			// 未宣告 image 能力时客户端不得发送图片；宣告后 @图片 附件
+			// 才能经 image block 到达本端（TUI 文本 @ 解析与此独立）。
+			PromptCapabilities: acpsdk.PromptCapabilities{Image: true},
 			SessionCapabilities: acpsdk.SessionCapabilities{
 				List:   &acpsdk.SessionListCapabilities{},
 				Close:  &acpsdk.SessionCloseCapabilities{},
@@ -339,9 +347,11 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 	// 与创建/加载会话时的通告形成双保险，幂等无副作用。
 	a.sendAvailableCommands(st.sid)
 
-	text := extractPromptText(params.Prompt)
-	if strings.TrimSpace(text) == "" {
-		return acpsdk.PromptResponse{}, errors.New("prompt must contain text content")
+	// 提取 prompt 中的文本与图片：图片块（ContentBlock::Image）转为
+	// 当轮注入的 llm.Image，经 agent.RunWithImages 直传模型（不持久化）。
+	text, images := extractPromptContent(params.Prompt)
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		return acpsdk.PromptResponse{}, errors.New("prompt must contain text or image content")
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -355,6 +365,9 @@ func (a *Agent) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsdk
 	} else if isCompressCommand(text) {
 		// 与 TUI /compress 一致：压缩全量历史并注入后续上下文（消息不记入会话）
 		err = st.ag.Compress(runCtx)
+	} else if len(images) > 0 {
+		// 带图消息走 RunWithImages：图片不落盘（当轮有效），文本走 @ 解析
+		err = st.ag.RunWithImages(runCtx, text, images)
 	} else {
 		err = st.ag.Run(runCtx, text)
 	}
@@ -822,10 +835,15 @@ func (a *Agent) replayHistory(st *sessionState) {
 
 // ---- 内部：消息处理 ----
 
-// extractPromptText 提取 prompt 中的文本内容（ContentBlock::Text 拼接）。
-// 非文本块（image/audio/resource 等）本期不支持，静默忽略。
-func extractPromptText(blocks []acpsdk.ContentBlock) string {
+// extractPromptContent 提取 prompt 中的文本与图片块：
+//   - 文本块按原有逻辑顺序拼接（块间换行分隔）；
+//   - 图片块（ContentBlock::Image）转为 llm.Image：inline base64 data 或
+//     file:// uri 都构造完整 data URI 直传模型（当轮有效、不持久化，
+//     与 agent.RunWithImages 的语义一致）；无法读取/不支持的 uri 静默忽略；
+//   - 其余块（audio/resource 等）沿用原策略：静默忽略。
+func extractPromptContent(blocks []acpsdk.ContentBlock) (string, []llm.Image) {
 	var b strings.Builder
+	var imgs []llm.Image
 	for _, blk := range blocks {
 		if blk.Text != nil {
 			if b.Len() > 0 {
@@ -833,8 +851,82 @@ func extractPromptText(blocks []acpsdk.ContentBlock) string {
 			}
 			b.WriteString(blk.Text.Text)
 		}
+		if blk.Image != nil {
+			if img, ok := promptImageToLLM(blk.Image); ok {
+				imgs = append(imgs, img)
+			}
+		}
 	}
-	return b.String()
+	return b.String(), imgs
+}
+
+// maxPromptImageBytes 是 ACP 图片块的单张大小上限（与 agent 侧 @ 引用的
+// maxImageBytes 口径一致：5MB，base64 后约 +33%）。防御异常/恶意客户端
+// 塞入超大图片撑爆请求体。
+const maxPromptImageBytes = 5 << 20 // 5 MB
+
+// promptImageToLLM 把 ACP 图片块（ContentBlockImage{data, mimeType, uri}）
+// 转为可直接投喂模型的 llm.Image（Data 为完整 data URI）。
+//
+// 两种数据形态：
+//   - inline：Data 字段直接是 base64 编码串，mimeType 由客户端提供
+//     （协议必填）；缺失时解码头部探测；超限（按 base64 长度折算）拒绝；
+//   - uri：仅支持 file:// 本地文件（远程 http(s) 图不下发下载，忽略），
+//     读取后编码为 data URI（当轮有效，不持久化）；
+//
+// 无法读取/超限/不支持的形态一律静默忽略（不阻塞整条 prompt）。
+func promptImageToLLM(img *acpsdk.ContentBlockImage) (llm.Image, bool) {
+	if img == nil {
+		return llm.Image{}, false
+	}
+	// 1) inline base64
+	if img.Data != "" {
+		// base64 长度上限：4/3 膨胀 + 少量 padding 余量
+		if len(img.Data) > maxPromptImageBytes*4/3+8 {
+			return llm.Image{}, false
+		}
+		mt := img.MimeType
+		if mt == "" {
+			if raw, err := base64.StdEncoding.DecodeString(img.Data); err == nil {
+				mt = http.DetectContentType(raw)
+			}
+		}
+		if mt == "" {
+			return llm.Image{}, false // 无法确定类型：不投喂，避免非法 part
+		}
+		return llm.Image{MediaType: mt, Data: "data:" + mt + ";base64," + img.Data}, true
+	}
+	// 2) uri 引用的本地文件
+	if img.Uri != nil {
+		u, err := url.Parse(*img.Uri)
+		if err != nil || u.Scheme != "file" {
+			return llm.Image{}, false
+		}
+		p := u.Path
+		if runtime.GOOS == "windows" && strings.HasPrefix(p, "/") {
+			// file:///C:/... 在 url.Path 中表现为 /C:/...：Windows 下去掉前导斜杠
+			p = strings.TrimPrefix(p, "/")
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return llm.Image{}, false
+		}
+		if len(data) > maxPromptImageBytes {
+			return llm.Image{}, false
+		}
+		mt := img.MimeType
+		if mt == "" {
+			mt = http.DetectContentType(data)
+		}
+		if mt == "" {
+			return llm.Image{}, false
+		}
+		return llm.Image{
+			MediaType: mt,
+			Data:      "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(data),
+		}, true
+	}
+	return llm.Image{}, false
 }
 
 // isInitCommand 判断用户消息是否为 /init 命令（"/init" 或 "/init <要求>"）。
