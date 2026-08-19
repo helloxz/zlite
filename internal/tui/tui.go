@@ -464,6 +464,10 @@ func (t *TUI) compressConversation() error {
 		t.chat.appendSystem("(still processing the previous message, please wait)")
 		return nil
 	}
+	if t.agent == nil { // 引导完成/热重载前无 agent，/compress 暂不可用
+		t.chat.appendSystem(colorize("Error: /compress is unavailable", ansiRed))
+		return nil
+	}
 	t.chat.appendSystem("Compressing conversation: summarizing the full history...")
 	t.status.setBusy(true)   // 同步置位（同 submit：消除 busy 检查的 TOCTOU 窗口）
 	t.chat.startProcessing() // 同步显示 [processing...]（压缩完成由 runCompress 置 done）
@@ -473,6 +477,12 @@ func (t *TUI) compressConversation() error {
 
 // runCompress 在后台执行压缩（busy 已由 compressConversation 同步置位）。
 func (t *TUI) runCompress() {
+	if t.agent == nil { // 防御：goroutine 内不 panic（正常路径由 compressConversation 拦截）
+		if t.program != nil {
+			t.program.Send(agentDoneMsg{err: errors.New("agent not initialized")})
+		}
+		return
+	}
 	err := t.agent.Compress(t.ctx)
 	if t.program != nil {
 		t.program.Send(agentDoneMsg{err: err})
@@ -495,6 +505,10 @@ func (t *TUI) initProject(args string) error {
 		t.chat.appendSystem("(still processing the previous message, please wait)")
 		return nil
 	}
+	if t.agent == nil { // 引导完成/热重载前无 agent，/init 暂不可用
+		t.chat.appendSystem(colorize("Error: /init is unavailable", ansiRed))
+		return nil
+	}
 	if t.agent.Mode() == agent.ModePlan {
 		t.chat.appendSystem("Running /init in plan mode: AGENTS.md content will be shown here. Switch to build mode (Tab or /build) and run /init again to write it to disk.")
 	} else {
@@ -512,6 +526,12 @@ func (t *TUI) initProject(args string) error {
 
 // runInit 在后台执行 init 任务（busy 已由 initProject 同步置位）。
 func (t *TUI) runInit(msg string) {
+	if t.agent == nil { // 防御：goroutine 内不 panic（正常路径由 initProject 拦截）
+		if t.program != nil {
+			t.program.Send(agentDoneMsg{err: errors.New("agent not initialized")})
+		}
+		return
+	}
 	err := t.agent.RunInit(t.ctx, msg)
 	if t.program != nil {
 		t.program.Send(agentDoneMsg{err: err})
@@ -544,8 +564,8 @@ func (t *TUI) newChat() error {
 	t.chat.appendSystem("New session started")
 	if t.agent != nil {
 		t.status.setTurns(t.agent.Turns(), t.agent.MaxTurns()) // 新会话轮次归零
+		t.agent.SetMode(agent.ModePlan)                        // /new 后模式重置为 plan
 	}
-	t.agent.SetMode(agent.ModePlan) // /new 后模式重置为 plan
 	return nil
 }
 
@@ -567,6 +587,9 @@ func (t *TUI) switchMode(m agent.Mode) {
 
 // toggleMode 在 plan 与 build 之间切换（Tab 键）。
 func (t *TUI) toggleMode() {
+	if t.agent == nil { // 引导完成前无 agent，忽略 Tab（同 switchMode）
+		return
+	}
 	if t.agent.Mode() == agent.ModePlan {
 		t.switchMode(agent.ModeBuild)
 	} else {
