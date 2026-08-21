@@ -289,3 +289,30 @@ func expandHomeDir(dir string) (string, error) {
 	}
 	return dir, nil
 }
+// defaultMCPFileContent 是首次启动时创建的 mcp.json 默认内容（空骨架）。
+const defaultMCPFileContent = "{\n  \"mcpServers\": {}\n}\n"
+
+// EnsureMCPFile 确保 MCP 配置文件存在，不存在则创建（幂等，不覆盖已有文件）。
+// file 为空时使用 DefaultMCPFile；路径支持 ~ 前缀。父目录不存在时自动创建。
+// 文件已存在直接返回 nil；其他错误返回给调用方（调用方决定是否仅警告）。
+func EnsureMCPFile(file string) error {
+	if file == "" {
+		file = DefaultMCPFile
+	}
+	path, err := expandHomeDir(file)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check MCP config file failed: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create MCP config dir failed: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(defaultMCPFileContent), 0o600); err != nil {
+		return fmt.Errorf("write MCP config file failed: %w", err)
+	}
+	return nil
+}

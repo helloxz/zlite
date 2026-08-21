@@ -63,6 +63,10 @@ func run(opts options) error {
 		if opts.acp {
 			return errors.New("config file not found; run zlite once to complete setup before using --acp")
 		}
+		// 首次启动：即便配置缺失也先初始化 mcp.json 空骨架
+		if e := config.EnsureMCPFile(config.DefaultMCPFile); e != nil {
+			fmt.Fprintln(os.Stderr, "mcp:", e)
+		}
 		return runWithSetup(cfgPath, opts)
 	}
 	if err != nil {
@@ -71,6 +75,9 @@ func run(opts options) error {
 	if cfg.NeedsSetup() {
 		if opts.acp {
 			return errors.New("zlite is not configured; run zlite once to complete setup before using --acp")
+		}
+		if e := config.EnsureMCPFile(cfg.MCP.File); e != nil {
+			fmt.Fprintln(os.Stderr, "mcp:", e)
 		}
 		return runWithSetup(cfgPath, opts)
 	}
@@ -128,6 +135,11 @@ func buildRuntime(cfgPath string, cfg *config.Config, opts options) (*runtime, e
 	// 工具在首轮对话前由 preRun（Attach）注册进注册表。
 	var mcpMgr *mcp.Manager
 	if cfg.MCP.Enabled {
+		// 首次启动初始化：~/.zlite/mcp.json 不存在则创建空骨架 {"mcpServers":{}}，
+		// 失败仅警告（不阻塞启动，LoadMCPServers 本就容忍文件缺失）。
+		if err := config.EnsureMCPFile(cfg.MCP.File); err != nil {
+			fmt.Fprintln(os.Stderr, "mcp:", err)
+		}
 		mcpMgr = mcp.New(cfg.MCP.File, cfg.MCP.MaxServers, cfg.MCP.MaxToolsPerServer)
 		// 配置解析警告立即打印（TUI 尚未启动，stderr 安全）
 		for _, w := range mcpMgr.ConfigWarnings() {
