@@ -553,7 +553,7 @@ func (a *Agent) emit(e Event) {
 }
 
 // titleSystemPrompt 是标题生成的系统提示词（单轮无工具、低 token、单句）。
-const titleSystemPrompt = "Summarize into a title, 10-20 Chinese chars or 8-10 English words. Output title only."
+const titleSystemPrompt = "Summarize into a title, 10-25 Chinese characters or 10-18 English words. Output title only, single line."
 
 // spawnTitleGen 异步生成标题：使用全局默认模型（config.DefaultModelName），
 // 成功则覆写会话标题并广播 TitleUpdatedEvent；空/失败保留原截断标题。
@@ -577,43 +577,53 @@ func (a *Agent) spawnTitleGen(content, sessID string, sessSnap *session.Session)
 		if streamer == nil {
 			spec, err := a.cfg.DefaultModelName()
 			if err != nil {
-				a.emit(SystemNoticeEvent{Text: "[title] DefaultModelName failed: " + err.Error()})
 				return
 			}
 			m, err := llm.BuildModelSpec(a.cfg, spec)
 			if err != nil {
-				a.emit(SystemNoticeEvent{Text: "[title] BuildModelSpec failed: " + err.Error()})
 				return
 			}
 			streamer = llm.Bind(m)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		stream, err := streamer.StreamText(ctx, llm.StreamRequest{
-			System:          titleSystemPrompt,
-			Messages:        []llm.Message{{Role: llm.RoleUser, Content: trimmed}},
-			MaxSteps:        1,
-			ReasoningEffort: "none",
-		})
+		// 标题生成对 reasoning 要求苛刻：muse-spark 等 openai.responses 模型不支持 reasoning_effort=none（400），
+		// 空 effort 又会触发 7-8k 思考导致 "http2: response body closed"；pro 模型用 none+1k 限流最快(2.8s)但部分模型需回退到 low。
+		// 策略：先试 none（最省 token、最快），若返回 invalid_request / body closed 则回退到 low 重试一次。
+		tryTitle := func(effort string) (string, error) {
+			stream, err := streamer.StreamText(ctx, llm.StreamRequest{
+				System:          titleSystemPrompt,
+				Messages:        []llm.Message{{Role: llm.RoleUser, Content: trimmed}},
+				MaxSteps:        1,
+				ReasoningEffort: effort,
+			})
+			if err != nil {
+				return "", err
+			}
+			var sb strings.Builder
+			for ch := range stream.Chunks() {
+				if ch.Err != nil {
+					return "", ch.Err
+				}
+				if ch.Text != "" {
+					sb.WriteString(ch.Text)
+				}
+			}
+			if err := stream.Err(); err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(sb.String()), nil
+		}
+		raw, err := tryTitle("none")
+		if err != nil && isTitleRetryable(err) {
+			a.emit(SystemNoticeEvent{Text: "[title] retry with low after: " + err.Error()})
+			raw, err = tryTitle("low")
+		}
 		if err != nil {
 			a.emit(SystemNoticeEvent{Text: "[title] StreamText failed: " + err.Error()})
 			return
 		}
-		var sb strings.Builder
-		for ch := range stream.Chunks() {
-			if ch.Err != nil {
-				a.emit(SystemNoticeEvent{Text: "[title] chunk err: " + ch.Err.Error()})
-				return
-			}
-			if ch.Text != "" {
-				sb.WriteString(ch.Text)
-			}
-		}
-		if err := stream.Err(); err != nil {
-			a.emit(SystemNoticeEvent{Text: "[title] stream Err: " + err.Error()})
-			return
-		}
-		raw := strings.TrimSpace(sb.String())
+		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			a.emit(SystemNoticeEvent{Text: "[title] empty response"})
 			return
@@ -640,4 +650,19 @@ func (a *Agent) spawnTitleGen(content, sessID string, sessSnap *session.Session)
 		}
 		a.emit(TitleUpdatedEvent{Title: after, SessionID: sessID})
 	}()
+}
+
+// isTitleRetryable 判断标题生成错误是否值得用 low 重试：
+// - openai.responses 对 none 返回 invalid_request: reasoning.effort does not support none
+// - 空 effort 触发 pro 模型 7-8k 思考导致 http2: response body closed
+func isTitleRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "reasoning") ||
+		strings.Contains(s, "effort") ||
+		strings.Contains(s, "does not support") ||
+		strings.Contains(s, "response body closed") ||
+		strings.Contains(s, "invalid_request")
 }

@@ -152,10 +152,10 @@ type StreamRequest struct {
 // Model 包装 goai 的 provider.LanguageModel，并携带 API 格式信息
 // （useResponsesAPI 是请求级开关，随每次生成请求注入 ProviderOptions）。
 type Model struct {
-	lm   provider.LanguageModel
-	resp bool // 使用 OpenAI Responses API（/v1/responses）
+	lm           provider.LanguageModel
+	resp         bool   // 使用 OpenAI Responses API（/v1/responses）
+	providerType string // 原始 provider type（openai.chat / openai.responses / anthropic），用于 reasoning 选项分流
 }
-
 // buildModel 按指定模型名构造模型（BuildModelSpec 共用）：
 //   - openai.chat      → compat.Chat（Chat Completions，兼容一切自定义端点）
 //   - openai.responses → openai.Chat + useResponsesAPI=true（要求端点支持 /responses）
@@ -169,19 +169,19 @@ func buildModel(p *config.Provider, model string) (*Model, error) {
 		if p.APIKey != "" {
 			opts = append(opts, compat.WithAPIKey(p.APIKey))
 		}
-		return &Model{lm: compat.Chat(model, opts...)}, nil
+		return &Model{lm: compat.Chat(model, opts...), providerType: string(p.Type)}, nil
 	case config.TypeOpenAIResponses:
 		opts := []openai.Option{openai.WithBaseURL(p.BaseURL)}
 		if p.APIKey != "" {
 			opts = append(opts, openai.WithAPIKey(p.APIKey))
 		}
-		return &Model{lm: openai.Chat(model, opts...), resp: true}, nil
+		return &Model{lm: openai.Chat(model, opts...), resp: true, providerType: string(p.Type)}, nil
 	case config.TypeAnthropic:
 		opts := []anthropic.Option{anthropic.WithBaseURL(p.BaseURL)}
 		if p.APIKey != "" {
 			opts = append(opts, anthropic.WithAPIKey(p.APIKey))
 		}
-		return &Model{lm: anthropic.Chat(model, opts...)}, nil
+		return &Model{lm: anthropic.Chat(model, opts...), providerType: string(p.Type)}, nil
 	default:
 		return nil, fmt.Errorf("不支持的 provider type: %q", p.Type)
 	}
@@ -308,9 +308,11 @@ func StreamText(ctx context.Context, model *Model, req StreamRequest) (Stream, e
 	if req.ReasoningEffort != "" {
 		po["reasoning_effort"] = req.ReasoningEffort
 		// none + 1k 预算：标题等低成本调用要求关闭/限流思考，避免 7-8k 推理。
-		// openai 用 reasoning_effort=none；anthropic/minimax 用 thinking 预算限流，
+		// openai 用 reasoning_effort=none（Responses API）；anthropic 用 thinking 预算限流，
 		// pro 模型禁用会报 "http2: response body closed"，故用 1k 限流而非 disabled。
-		if req.ReasoningEffort == "none" {
+		// 注意：thinking 仅对 anthropic（及兼容的 minimax）有效，openai 误发会透传为 body["thinking"] 导致 400
+		// 或被忽略，故按 providerType 严格分流。
+		if req.ReasoningEffort == "none" && model.providerType == config.TypeAnthropic {
 			po["thinking"] = map[string]any{"type": "enabled", "budget_tokens": 1024}
 		}
 	}
