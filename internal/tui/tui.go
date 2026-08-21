@@ -97,6 +97,10 @@ type TUI struct {
 	// Approver 经 program.Send 投递 approvalRequestMsg，handleKey 消费）。
 	confirm *confirmDialog
 
+	// refreshPending 标记是否有待执行的防抖刷新（TextDelta 高频聚合），
+	// 避免每 delta 即 SetContent 全量重绘导致 tmux+altScreen 绿块闪烁。
+	refreshPending bool
+
 	ctx     context.Context
 	cancel  context.CancelFunc
 	program *tea.Program // Run 启动后非 nil；Stop 与 Approver 经它投递

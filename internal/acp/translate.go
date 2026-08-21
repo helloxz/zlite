@@ -82,6 +82,18 @@ func (a *Agent) translate(st *sessionState, ev agent.Event) {
 			SessionId: st.sid,
 			Update:    acpsdk.UpdateAgentThoughtText(e.Text),
 		})
+	case agent.TitleUpdatedEvent:
+		// 标题异步更新（首条消息 AI 生成），推送 session_info_update
+		title := e.Title
+		_ = a.conn.SessionUpdate(ctx, acpsdk.SessionNotification{
+			SessionId: st.sid,
+			Update: acpsdk.SessionUpdate{
+				SessionInfoUpdate: &acpsdk.SessionSessionInfoUpdate{
+					Title:         &title,
+					SessionUpdate: "session_info_update",
+				},
+			},
+		})
 	}
 	// ThinkingStartEvent / DoneEvent / TextDoneEvent 不单独映射：
 	// 思考开始状态由 thought chunk 本身表达；结束以 Prompt 响应（stopReason）表达。

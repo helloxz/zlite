@@ -59,7 +59,16 @@ type SystemNoticeEvent struct {
 	Text string
 }
 
+// TitleUpdatedEvent 是 AI 异步生成标题完成后发出的事件（首条用户消息时）。
+// TUI/ACP 据此实时刷新会话列表的标题展示；标题已落盘到 jsonl/meta。
+type TitleUpdatedEvent struct {
+	Title     string // 新标题（已 sanitize）
+	SessionID string // 所属会话 ID（供多会话场景校验）
+}
+
 func (SystemNoticeEvent) isEvent() {}
+
+func (TitleUpdatedEvent) isEvent() {}
 
 func (TextDeltaEvent) isEvent()      {}
 func (TextDoneEvent) isEvent()       {}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/helloxz/zlite/internal/config"
 	"github.com/helloxz/zlite/internal/llm"
@@ -52,11 +53,12 @@ type Agent struct {
 	preRun func(ctx context.Context) error
 	// approvalMu 串行化权限确认：goai 对并行工具调用（executeToolsParallel）
 	// 并发触发多个 onBeforeToolExecute，而确认器实现（如 TUI 单通道弹窗）
-	// 通常只支持一个挂起请求——并发会互相覆盖导致确认永久阻塞。
+	// 通常只支持一个挂起请求——并发会互相覆盖导致永久阻塞。
 	// 加锁后一次只弹一个确认，其余工具调用等待。
 	approvalMu sync.Mutex
+	// titleGen 是标题生成的 Streamer 覆盖（测试注入用；nil 时按 cfg.DefaultModelName 构建）。
+	titleGen llm.Streamer
 }
-
 // New 创建 Agent。
 // mode 为初始模式（plan/build）；skills 提供 skills 列表（nil 时不注入，测试可传 nil）。
 func New(cfg *config.Config, streamer llm.Streamer, registry *tools.Registry, sess *session.Session, approver Approver, cwd string, mode Mode, skills SkillsProvider) *Agent {
@@ -104,6 +106,14 @@ func (a *Agent) Thinking() string {
 	}
 	return a.thinking
 }
+
+// SetTitleGenStreamer 注入标题生成的 Streamer（测试用；nil 恢复默认行为）。
+func (a *Agent) SetTitleGenStreamer(s llm.Streamer) {
+	a.mu.Lock()
+	a.titleGen = s
+	a.mu.Unlock()
+}
+
 
 // SetThinking 设置思考强度（/thinking 命令用）。
 // "auto" 归一化为空字符串：不传 reasoning_effort 参数，由 API 自行决定；
@@ -195,8 +205,19 @@ func (a *Agent) run(ctx context.Context, userMsg string, extImages []llm.Image) 
 	if err != nil {
 		return err
 	}
+	wasFirst := !a.sess.HasTitle()
 	if err := a.sess.AppendUser(text, imgs...); err != nil {
 		return fmt.Errorf("保存用户消息失败: %w", err)
+	}
+	// 首条用户消息：异步生成 AI 标题（全局默认模型），成功则覆写截断标题并广播
+	if wasFirst {
+		// 快照会话指针与 ID，避免并发切换会话时写错文件
+		sessSnap := a.sess
+		sessID := sessSnap.ID
+		// 文本为空且仅有图片时不生成标题（无有效文本）
+		if strings.TrimSpace(text) != "" {
+			a.spawnTitleGen(text, sessID, sessSnap)
+		}
 	}
 	for _, img := range imgs {
 		a.emit(SystemNoticeEvent{Text: "Attached image: " + img.Path})
@@ -231,7 +252,7 @@ func (a *Agent) Compress(ctx context.Context) error {
 	if countTurns(a.sess.ToMessages()) >= maxConversationTurns {
 		return errors.New("Conversation limit reached: this session has exceeded 60 turns. Start a new session with /new.")
 	}
-	if a.sess.SummarySet {
+	if _, ok := a.sess.GetSummary(); ok {
 		return errors.New("Conversation already compressed: each session allows at most one compression.")
 	}
 	if countTurns(a.sess.ToMessages()) < compressMinTurns {
@@ -529,4 +550,94 @@ func (a *Agent) emit(e Event) {
 	case a.events <- e:
 	default:
 	}
+}
+
+// titleSystemPrompt 是标题生成的系统提示词（单轮无工具、低 token、单句）。
+const titleSystemPrompt = "Summarize into a title, 10-20 Chinese chars or 8-10 English words. Output title only."
+
+// spawnTitleGen 异步生成标题：使用全局默认模型（config.DefaultModelName），
+// 成功则覆写会话标题并广播 TitleUpdatedEvent；空/失败保留原截断标题。
+// 调用方已确认 wasFirst 且 text 非空；sessSnap 为触发时的会话指针快照。
+func (a *Agent) spawnTitleGen(content, sessID string, sessSnap *session.Session) {
+	trimmed := strings.TrimSpace(content)
+	if len([]rune(trimmed)) < 4 {
+		return
+	}
+	runes := []rune(trimmed)
+	if len(runes) > 2000 {
+		trimmed = string(runes[:2000])
+	}
+	go func() {
+		var streamer llm.Streamer
+		a.mu.Lock()
+		if a.titleGen != nil {
+			streamer = a.titleGen
+		}
+		a.mu.Unlock()
+		if streamer == nil {
+			spec, err := a.cfg.DefaultModelName()
+			if err != nil {
+				a.emit(SystemNoticeEvent{Text: "[title] DefaultModelName failed: " + err.Error()})
+				return
+			}
+			m, err := llm.BuildModelSpec(a.cfg, spec)
+			if err != nil {
+				a.emit(SystemNoticeEvent{Text: "[title] BuildModelSpec failed: " + err.Error()})
+				return
+			}
+			streamer = llm.Bind(m)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		stream, err := streamer.StreamText(ctx, llm.StreamRequest{
+			System:          titleSystemPrompt,
+			Messages:        []llm.Message{{Role: llm.RoleUser, Content: trimmed}},
+			MaxSteps:        1,
+			ReasoningEffort: "none",
+		})
+		if err != nil {
+			a.emit(SystemNoticeEvent{Text: "[title] StreamText failed: " + err.Error()})
+			return
+		}
+		var sb strings.Builder
+		for ch := range stream.Chunks() {
+			if ch.Err != nil {
+				a.emit(SystemNoticeEvent{Text: "[title] chunk err: " + ch.Err.Error()})
+				return
+			}
+			if ch.Text != "" {
+				sb.WriteString(ch.Text)
+			}
+		}
+		if err := stream.Err(); err != nil {
+			a.emit(SystemNoticeEvent{Text: "[title] stream Err: " + err.Error()})
+			return
+		}
+		raw := strings.TrimSpace(sb.String())
+		if raw == "" {
+			a.emit(SystemNoticeEvent{Text: "[title] empty response"})
+			return
+		}
+		if idx := strings.Index(raw, "\n"); idx >= 0 {
+			raw = strings.TrimSpace(raw[:idx])
+		}
+		if raw == "" {
+			a.emit(SystemNoticeEvent{Text: "[title] empty after first line"})
+			return
+		}
+		if sessSnap.ID != sessID {
+			return
+		}
+		before := sessSnap.GetTitle()
+		if err := sessSnap.UpdateTitle(raw); err != nil {
+			a.emit(SystemNoticeEvent{Text: "[title] UpdateTitle failed: " + err.Error()})
+			return
+		}
+		after := sessSnap.GetTitle()
+		if before == after {
+			// 标题相同（模型复述了截断标题），仍视为成功但不额外通知
+			return
+		}
+		a.emit(TitleUpdatedEvent{Title: after, SessionID: sessID})
+	}()
 }

@@ -86,10 +86,11 @@ func (a *Agent) buildHistory(noteTruncation bool) []llm.Message {
 	// 压缩摘要头部注入：summary 存于 meta（不在 History），故必须在截断之后
 	// 前置——不参与轮次统计（countTurns 只数 History 的 user 消息），
 	// 也不会被截断切掉（截断起点始终在其之后的对话消息中）。
-	if a.sess.SummarySet && a.sess.Summary != "" {
-		history = append([]llm.Message{{Role: llm.RoleUser, Content: summaryPrefix + a.sess.Summary}}, history...)
+	if sum, ok := a.sess.GetSummary(); ok && sum != "" {
+		history = append([]llm.Message{{Role: llm.RoleUser, Content: summaryPrefix + sum}}, history...)
 	}
 	return history
+
 }
 
 // joinTurnText 拼接主循环文本与收尾总结：两侧均做空白裁剪，

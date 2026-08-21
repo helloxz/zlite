@@ -307,6 +307,12 @@ func StreamText(ctx context.Context, model *Model, req StreamRequest) (Stream, e
 	}
 	if req.ReasoningEffort != "" {
 		po["reasoning_effort"] = req.ReasoningEffort
+		// none + 1k 预算：标题等低成本调用要求关闭/限流思考，避免 7-8k 推理。
+		// openai 用 reasoning_effort=none；anthropic/minimax 用 thinking 预算限流，
+		// pro 模型禁用会报 "http2: response body closed"，故用 1k 限流而非 disabled。
+		if req.ReasoningEffort == "none" {
+			po["thinking"] = map[string]any{"type": "enabled", "budget_tokens": 1024}
+		}
 	}
 	if len(po) > 0 {
 		opts = append(opts, goai.WithProviderOptions(po))

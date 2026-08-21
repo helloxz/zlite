@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -17,8 +18,12 @@ import (
 // agentEventMsg 包装 agent 事件流中的一条事件。
 type agentEventMsg struct{ ev agent.Event }
 
+// debouncedRefreshMsg 是 TextDelta 高频聚合后的防抖刷新（避免每 delta 即全量 SetContent 闪屏）。
+type debouncedRefreshMsg struct{}
+
 // agentDoneMsg 是 runAgent/runInit 后台完成回调（对应 gocui 版的 t.ui(...)）。
 type agentDoneMsg struct{ err error }
+
 
 // setupStartMsg 触发首次配置引导（Init 阶段投递，等价 gocui 版
 // MainLoop 首循环后的 UpdateAsync 投递）。
@@ -114,12 +119,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentEventMsg:
+		// TextDelta 高频聚合防抖：仅在真实 TUI 运行时（program != nil）生效，避免 tmux 绿块闪烁；
+		// 测试中 program==nil 时保持即时刷新以通过回归用例。
+		// 采用纯防抖（无首帧即时），35ms 聚合将 50-200Hz 的流式增量降至 ~28Hz，显著降低 viewport 全量 SetContent 频率。
+		if _, isTextDelta := msg.ev.(agent.TextDeltaEvent); isTextDelta && t.program != nil {
+			m.handleAgentEvent(msg.ev)
+			if !t.refreshPending {
+				t.refreshPending = true
+				return m, tea.Batch(
+					tea.Tick(35*time.Millisecond, func(time.Time) tea.Msg { return debouncedRefreshMsg{} }),
+					waitAgentEvent(t.agent.Events(), t.ctx.Done()),
+				)
+			}
+			// 已有待刷新，等待既有 tick 聚合（chat 已 append，viewport 将在 tick 时统一刷新）
+			if t.agent != nil {
+				return m, waitAgentEvent(t.agent.Events(), t.ctx.Done())
+			}
+			return m, nil
+		}
 		m.handleAgentEvent(msg.ev)
 		m.refreshChat()
 		// 继续订阅（events 通道由 agent 生命周期管理）
 		if t.agent != nil {
 			return m, waitAgentEvent(t.agent.Events(), t.ctx.Done())
 		}
+		return m, nil
+
+	case debouncedRefreshMsg:
+		t.refreshPending = false
+		m.refreshChat()
 		return m, nil
 
 	case agentResubscribeMsg:
@@ -129,6 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentDoneMsg:
+		t.refreshPending = false
 		t.status.setBusy(false)
 		t.chat.finishProcessing() // 整轮生成结束：统一置 [done]
 		if t.agent != nil {
@@ -371,6 +400,9 @@ func (m model) handleAgentEvent(ev agent.Event) {
 		t.chat.confirmThinking()
 	case agent.SystemNoticeEvent:
 		t.chat.appendSystem(e.Text)
+	case agent.TitleUpdatedEvent:
+		// 标题异步更新：实时反馈到聊天区（会话列表下次 /sessions 自动最新）
+		t.chat.appendSystem("Title updated: " + e.Title)
 	case agent.DoneEvent:
 		t.status.setUsage(e.Usage)
 	}

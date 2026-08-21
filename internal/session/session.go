@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/helloxz/zlite/internal/llm"
@@ -31,7 +32,8 @@ type Session struct {
 	Title     string // 会话标题（首条用户消息截取，持久化在 meta 记录中）
 	CreatedAt string // 会话创建时间（RFC3339，取自 jsonl 首行；meta 缓存用）
 
-	file    *os.File
+	mu   sync.Mutex // 保护 file/History/Title/titleSet/metaMessages/metaPath
+	file *os.File
 	History []Record // 恢复后内存中的记录（不含 session 首行）
 
 	// titleSet 标记标题已确定（区别于 Title=="" 的未设置状态）：
@@ -50,7 +52,18 @@ type Session struct {
 }
 
 // Append 追加一行记录：写文件（立即落盘）并同步到 History 与 meta 缓存。
+// 线程安全：并发 Append 与 UpdateTitle 串行化，避免 jsonl 交错。
 func (s *Session) Append(r Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendLocked(r)
+}
+
+// appendLocked 是 Append 的持锁实现（调用方已持有 mu）。
+func (s *Session) appendLocked(r Record) error {
+	if s.file == nil {
+		return fmt.Errorf("会话已关闭")
+	}
 	if r.Ts == "" {
 		r.Ts = time.Now().Format(time.RFC3339)
 	}
@@ -70,13 +83,20 @@ func (s *Session) Append(r Record) error {
 	}
 	// 刷新 meta 缓存（列表用）。meta 是派生缓存，写失败静默不阻塞主路径，
 	// 一致性由 open 打开会话时全量重建收敛。
-	s.syncMeta(time.Now().Format(time.RFC3339Nano))
+	s.syncMetaLocked(time.Now().Format(time.RFC3339Nano))
 	return nil
 }
 
 // syncMeta 将当前内存状态写入 meta 缓存文件（<Path>.jsonl.meta）。
 // 缓存语义：失败静默；updatedAt 为排序用的最后活跃时间（RFC3339Nano）。
 func (s *Session) syncMeta(updatedAt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syncMetaLocked(updatedAt)
+}
+
+// syncMetaLocked 是 syncMeta 的持锁实现。
+func (s *Session) syncMetaLocked(updatedAt string) {
 	if s.metaPath == "" {
 		return
 	}
@@ -99,15 +119,94 @@ func (s *Session) syncMeta(updatedAt string) {
 // 首条用户消息时自动生成会话标题（截取内容前段）并以 meta 记录落盘；
 // meta 写入成功后才更新内存状态，失败时调用方重试不会丢标题。
 func (s *Session) AppendUser(content string, imgs ...ImageRef) error {
-	if !s.titleSet {
+	// 判断是否需要生成标题：需在锁外预判，避免与 UpdateTitle 竞争时重复写？
+	// 采用先读锁判断，真正写入由 appendLocked 原子保护。
+	s.mu.Lock()
+	needTitle := !s.titleSet
+	s.mu.Unlock()
+	if needTitle {
 		title := extractTitle(content)
 		if err := s.AppendMeta(metaTitleEvent, title); err != nil {
 			return err
 		}
-		s.Title = title
-		s.titleSet = true
+		s.mu.Lock()
+		// 再次检查：异步 UpdateTitle 可能已先写入 AI 标题，避免覆盖更优标题。
+		// 若 titleSet 已被 AI 标题置位，则不再用截断标题覆盖。
+		if !s.titleSet {
+			s.Title = title
+			s.titleSet = true
+		}
+		s.mu.Unlock()
+		// title meta 已由 AppendMeta 触发 syncMeta，无需再次 sync
 	}
 	return s.Append(Record{Type: TypeMessage, Role: "user", Content: content, Images: imgs})
+}
+
+// sanitizeTitle 清洗 AI 生成的标题：去首尾空白、去首尾引号/书名号、压缩空白，
+// 并按 maxTitleRunes 截断（AI 标题即使超长也截断兜底）。
+func sanitizeTitle(s string) string {
+	t := strings.TrimSpace(s)
+	// 去首尾引号/书名号
+	t = strings.Trim(t, "\"'“”‘’《》<>`")
+	t = strings.TrimSpace(t)
+	// 压缩内部空白为单空格，并去掉换行
+	t = strings.Join(strings.Fields(t), " ")
+	if t == "" {
+		return ""
+	}
+	runes := []rune(t)
+	if len(runes) <= maxTitleRunes {
+		return t
+	}
+	return string(runes[:maxTitleRunes]) + "…"
+}
+
+// HasTitle 返回标题是否已确定（包括空标题的已确定状态）。
+func (s *Session) HasTitle() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.titleSet
+}
+
+// GetTitle 线程安全地返回当前标题。
+func (s *Session) GetTitle() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Title
+}
+
+// UpdateTitle 异步以 AI 生成的标题更新会话标题（线程安全）。
+// 标题经 sanitizeTitle 清洗；空或与现有标题相同则忽略。
+// 成功时追加一条 metaTitleEvent 记录并刷新 meta 缓存，失败返回错误。
+func (s *Session) UpdateTitle(title string) error {
+	ct := sanitizeTitle(title)
+	if ct == "" {
+		return fmt.Errorf("标题为空")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return fmt.Errorf("会话已关闭")
+	}
+	if ct == s.Title {
+		return nil
+	}
+	// 直接持锁写入，避免递归锁
+	rec := Record{Type: TypeMeta, Event: metaTitleEvent, Value: ct}
+	if rec.Ts == "" {
+		rec.Ts = time.Now().Format(time.RFC3339)
+	}
+	line, err := rec.encode()
+	if err != nil {
+		return err
+	}
+	if _, err := s.file.Write(line); err != nil {
+		return fmt.Errorf("写入会话失败: %w", err)
+	}
+	s.Title = ct
+	s.titleSet = true
+	s.syncMetaLocked(time.Now().Format(time.RFC3339Nano))
+	return nil
 }
 
 // extractTitle 从首条用户消息提取会话标题：去除首尾空白后取前
@@ -161,8 +260,10 @@ func (s *Session) AppendSummary(content string) error {
 	if err := s.AppendMeta(metaSummaryEvent, content); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.Summary = content
 	s.SummarySet = true
+	s.mu.Unlock()
 	return nil
 }
 
@@ -172,8 +273,11 @@ func (s *Session) AppendSummary(content string) error {
 //   - assistant 文本与其后紧随的 tool_call 记录合并为一条带 ToolCalls 的 assistant 消息
 //   - tool_result 记录转为 tool 消息（按 call_id 关联）
 func (s *Session) ToMessages() []llm.Message {
+	s.mu.Lock()
+	hist := append([]Record(nil), s.History...)
+	s.mu.Unlock()
 	var out []llm.Message
-	for _, r := range s.History {
+	for _, r := range hist {
 		switch r.Type {
 		case TypeMessage:
 			if r.Role == "user" {
@@ -206,12 +310,21 @@ func (s *Session) ToMessages() []llm.Message {
 
 // Close 关闭会话文件。
 func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.file != nil {
 		err := s.file.Close()
 		s.file = nil
 		return err
 	}
 	return nil
+}
+
+// GetSummary 线程安全地返回压缩摘要及是否已压缩。
+func (s *Session) GetSummary() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Summary, s.SummarySet
 }
 
 // newSessionID 生成会话 ID：时间戳 + 3 位随机后缀。

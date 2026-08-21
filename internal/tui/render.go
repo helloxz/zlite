@@ -104,15 +104,22 @@ func (r *mdRenderer) Render(text string) string {
 	return b.String()
 }
 
-// wrap 按当前代码块状态着色。
+// wrap 按当前代码块状态着色，逐行包色并确保行尾 reset，避免 viewport 换行时 SGR 污染下一行导致绿闪。
 func (r *mdRenderer) wrap(s string) string {
 	if s == "" {
 		return ""
 	}
 	if r.inCodeBlock {
-		return colorize(s, ansiGreen)
+		// 代码块内：按行单独着色，确保每行首尾 SGR 闭合，tmux 重绘不闪
+		lines := strings.Split(s, "\n")
+		for i, ln := range lines {
+			if ln != "" {
+				lines[i] = colorize(ln, ansiGreen)
+			}
+		}
+		return strings.Join(lines, "\n")
 	}
-	// 代码块外：行内代码着色
+	// 代码块外：行内代码着色（已是行内级，无需逐行）
 	return inlineCodeRe.ReplaceAllStringFunc(s, func(m string) string {
 		return colorize(m, ansiGreen)
 	})

@@ -144,8 +144,11 @@ func (c *chatView) loadHistory(msgs []llm.Message) {
 // renderString 生成聊天区完整渲染字符串（头带按 w 补空格）。
 // 手动滚动（autoScroll=false）时由调用方保留当前滚动位置：
 // viewport.SetContent 会 clamp 越界偏移，无需像 gocui 版手动恢复 Origin。
+// 注意：mdRenderer 为流式增量设计（inCodeBlock 跨片段），但本方法每次重绘全量历史，
+// 必须用全新渲染器而非复用 c.md——否则未闭合代码块在下一帧起始状态错误会导致首段颜色翻转闪烁。
 func (c *chatView) renderString(w int) string {
 	var b strings.Builder
+	var md mdRenderer // 每帧全新，避免跨帧状态污染
 	for _, e := range c.entries {
 		switch e.kind {
 		case "divider":
@@ -172,7 +175,7 @@ func (c *chatView) renderString(w int) string {
 			b.WriteString(paintBar(head, mark, markFg, ansiBarZlite, w))
 			b.WriteString("\n")
 			if e.text != "" {
-				b.WriteString(c.md.Render(e.text))
+				b.WriteString(md.Render(e.text))
 				b.WriteString("\n")
 			}
 		case "tool":
