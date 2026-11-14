@@ -34,10 +34,14 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
+      # 用范围版本 + check-latest，拿到当前分支最新的补丁版（含安全修复）。
+      # 不用 go-version-file：它会精确安装 go.mod 的 go 指令版本（如 1.26.0），
+      # 把首发版本的已知漏洞带进发布产物。
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.x'
+          check-latest: true
 
       - name: Resolve release tag
         id: tag
@@ -68,6 +72,13 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      # 安全闸门：源码模式下扫描依赖与标准库的已知漏洞（DB 来自 vuln.go.dev）。
+      # 若某天因新披露漏洞导致发版被拦住，请升级依赖/工具链，而不是直接删掉这一步。
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
 
       - name: Build all platforms
         run: ./scripts/pack.sh --all
