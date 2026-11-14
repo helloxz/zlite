@@ -16,7 +16,7 @@
 [agent]
   mode = "plan"                  # 默认模式: plan | build
   auto_approve = false           # 信任模式（跳过确认）
-  max_steps = 16                 # 单轮对话工具循环上限
+  max_steps = 50                 # 单轮对话工具循环上限
 
 [shell]
   confirm_commands = ["rm", "mv", "dd", "mkfs", "sudo", "chmod", "git", "git-push"]
@@ -43,7 +43,7 @@ func (c *Config) DefaultProvider() (*Provider, error)  // 一期: 取 providers[
 ```
 
 - ENV 展开：`api_key` 等字段若为 `${VAR}` 形式，从环境变量取值；变量未设置则报错提示
-- 默认值：`agent.mode=plan`、`agent.auto_approve=false`、`agent.max_steps=16`
+- 默认值：`agent.mode=plan`、`agent.auto_approve=false`、`agent.max_steps=50`
 - 支持命令行覆盖：`-m build` 优先于配置文件
 
 ## 2. 会话 jsonl 格式

@@ -69,7 +69,7 @@ irm https://raw.githubusercontent.com/helloxz/zlite/main/update.ps1 | iex
 
 ## Build from Source
 
-Requires Go ≥ 1.25
+Requires Go ≥ 1.26
 
 ```bash
 make build        # produces bin/zlite with the version info injected

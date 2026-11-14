@@ -36,7 +36,7 @@ const (
 // 默认值。
 const (
 	defaultMode     = ModePlan
-	defaultMaxSteps = 16
+	defaultMaxSteps = 50
 	defaultType     = TypeOpenAIChat
 )
 
@@ -478,7 +478,7 @@ func WriteTemplate(path string) error {
   mode = "plan"                  # plan（只读）| build（可写）
   default_model = "default/gpt-4o"  # 默认模型（provider_name/model_name）；缺省取第一个渠道第一个模型
   auto_approve = false           # 信任模式（跳过危险命令确认）
-  max_steps = 16                 # 单轮工具循环上限
+  max_steps = 50                 # 单轮工具循环上限
   load_agents_md = true          # 自动加载项目根 AGENTS.md 注入系统提示词
 
 [shell]

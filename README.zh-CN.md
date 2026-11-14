@@ -69,7 +69,7 @@ irm https://raw.githubusercontent.com/helloxz/zlite/main/update.ps1 | iex
 
 ## 从源码构建
 
-要求 Go ≥ 1.25
+要求 Go ≥ 1.26
 
 ```bash
 make build        # 产物 bin/zlite，自动注入版本号

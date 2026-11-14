@@ -58,7 +58,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
   mode = "plan"            # plan（只读：仅阅读/搜索）| build（可写：改文件/执行命令）
   default_model = "default/gpt-4o"  # 默认模型（provider_name/model_name）；缺省取第一个渠道第一个模型
   auto_approve = false     # true = 信任模式，跳过危险命令确认（谨慎）
-  max_steps = 16           # 单轮回答中工具调用循环的上限
+  max_steps = 50           # 单轮回答中工具调用循环的上限
   load_agents_md = true    # 自动加载项目根 AGENTS.md 注入系统提示词
 
 # ============ shell 工具 ============
@@ -87,7 +87,7 @@ ZLITE_DEFAULT_API_KEY=sk-xxxxxxxxxxxxxxxx
 | `agent.mode` | string | `"plan"` | `plan` / `build` |
 | `agent.default_model` | string | 第一个渠道第一个模型 | 默认模型引用 `provider_name/model_name`；无效引用启动即报错 |
 | `agent.auto_approve` | bool | `false` | 跳过危险命令确认 |
-| `agent.max_steps` | int | `16` | 工具循环上限 |
+| `agent.max_steps` | int | `50` | 工具循环上限 |
 | `agent.load_agents_md` | bool | `true` | 自动加载项目 AGENTS.md |
 | `shell.confirm_commands` | string[] | 见模板 | 需确认的命令前缀 |
 | `shell.plan_extra_commands` | string[] | `[]` | plan 模式额外放行命令名（与内置白名单合并去重） |
